@@ -54,7 +54,7 @@ async function fetchPostsViaApify() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           searchQuery: query,
-          sort: 'new',
+          sort: 'relevance',
           timeFilter: 'day',
           maxPostsPerSource: 20,
           includeComments: false,
