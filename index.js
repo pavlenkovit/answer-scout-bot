@@ -2,33 +2,12 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 
-// --- Config ---
 const SEARCH_QUERIES = [
-  // Direct app recommendations
-  'best app learn vocabulary',
-  'app to learn new words',
-  'vocabulary app recommendation',
-  'flashcard app language',
-  'anki alternative language',
-  'best app memorize words',
-  // Language learning general
-  'how do you learn vocabulary',
-  'how to memorize vocabulary',
-  'struggling to learn vocabulary',
-  'best way to learn words language',
-  'spaced repetition language learning',
-  // Specific subreddit-focused
-  'subreddit:languagelearning vocabulary app',
-  'subreddit:languagelearning best app',
-  'subreddit:LearnJapanese vocabulary app',
-  'subreddit:LearnJapanese anki alternative',
-  'subreddit:Spanish vocabulary',
-  'subreddit:French vocabulary app',
-  'subreddit:German vocabulary app',
+  'words learning app',
+  'learn language app',
 ];
 
 const SEEN_FILE = path.join(__dirname, 'seen_posts.json');
-const REDDIT_USER_AGENT = 'reddit-scout-bot/1.0';
 
 const SYSTEM_PROMPT = `You are a helpful member of the Reddit community who genuinely loves helping people learn languages. You also happen to be the creator of VibeLing — a vocabulary builder app.
 
@@ -43,14 +22,11 @@ About VibeLing:
 YOUR RULES:
 1. FIRST AND FOREMOST — be genuinely helpful. Answer the person's question fully and thoughtfully.
 2. Share practical advice, personal experience, and useful tips that actually help.
-3. Only mention VibeLing if it's truly relevant to what they're asking about. If the post is about grammar, pronunciation, or something unrelated to vocabulary — do NOT mention VibeLing at all.
-4. When you do mention VibeLing, do it naturally and briefly — like a casual recommendation, not an ad. For example: "I've been using VibeLing for this and it worked well for me" or "You might also check out VibeLing".
-5. Never be pushy or salesy. The goal is to be a valued community member first.
-6. Keep the response concise — 3-6 sentences max. Reddit users don't read walls of text.
-7. Write in the same language as the original post (usually English).
-8. Sound like a real person, not a bot. Be warm but not over-the-top.`;
-
-// --- Helpers ---
+3. ALWAYS mention VibeLing in your reply — but do it naturally and briefly, like a casual recommendation. For example: "I've been using VibeLing for this and it worked well for me" or "You might also check out VibeLing".
+4. Never be pushy or salesy. The goal is to be a valued community member first, but always find a way to naturally weave in VibeLing.
+5. Keep the response concise — 3-6 sentences max. Reddit users don't read walls of text.
+6. Write in the same language as the original post (usually English).
+7. Sound like a real person, not a bot. Be warm but not over-the-top.`;
 
 function loadSeen() {
   try {
@@ -64,19 +40,68 @@ function saveSeen(seen) {
   fs.writeFileSync(SEEN_FILE, JSON.stringify(seen, null, 2));
 }
 
-async function fetchRedditSearch(query) {
-  const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(query)}&sort=new&t=day&limit=10`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': REDDIT_USER_AGENT },
-  });
+async function fetchPostsViaApify() {
+  const token = process.env.APIFY_API_TOKEN;
+  let allPosts = [];
 
-  if (!res.ok) {
-    console.error(`Reddit API error for "${query}": ${res.status}`);
-    return [];
+  for (const query of SEARCH_QUERIES) {
+    console.log(`Apify search: "${query}"`);
+
+    const res = await fetch(
+      `https://api.apify.com/v2/acts/automation-lab~reddit-scraper/run-sync-get-dataset-items?token=${token}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          searchQuery: query,
+          sort: 'new',
+          timeFilter: 'day',
+          maxPostsPerSource: 20,
+          includeComments: false,
+          deduplicatePosts: true,
+        }),
+        signal: AbortSignal.timeout(290000),
+      }
+    );
+
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(`  Apify error for "${query}": ${res.status} ${text}`);
+      continue;
+    }
+
+    const items = await res.json();
+    const posts = items.filter((item) => item.type === 'post');
+    allPosts.push(...posts);
   }
 
-  const data = await res.json();
-  return (data?.data?.children || []).map((c) => c.data);
+  // Deduplicate by id
+  const unique = new Map();
+  for (const item of allPosts) {
+    if (item.id && !unique.has(item.id)) {
+      unique.set(item.id, item);
+    }
+  }
+
+  const result = [...unique.values()].map((item) => ({
+    id: item.id,
+    title: item.title || '',
+    text: item.selfText || '',
+    subreddit: item.subreddit || '',
+    url: item.url || '',
+    permalink: item.permalink || '',
+    postedDate: item.createdAt ? new Date(item.createdAt) : null,
+    votes: item.score || 0,
+    numComments: item.numComments || 0,
+    author: item.author || '',
+  }));
+
+  console.log(`Total unique posts: ${result.length}`);
+  if (result.length > 0) {
+    const sample = result[0];
+    console.log(`  Sample normalized: date=${sample.postedDate}, title="${sample.title}", subreddit=${sample.subreddit}`);
+  }
+  return result;
 }
 
 async function checkRelevance(post) {
@@ -84,11 +109,14 @@ async function checkRelevance(post) {
 
 Title: ${post.title}
 Subreddit: r/${post.subreddit}
-Body: ${(post.selftext || '').slice(0, 500)}
+Body: ${(post.text || '').slice(0, 500)}
 
 Reply with ONLY "yes" or "no" and a short reason (one sentence).
-"yes" = the post is related to language learning in ANY way: vocabulary, flashcards, spaced repetition, apps, methods, tips, struggles, motivation, resources, or even general questions about learning a new language. Be generous — if there's any angle where a language learner could chime in helpfully, say yes.
-"no" = the post has absolutely nothing to do with language learning (coupons, resumes, gaming, coding, finance, etc.)`;
+"yes" = the post is related to language learning AND either:
+  - mentions one of these languages: English, Spanish, German, French, Romanian, Serbian, Russian
+  - OR does not mention any specific language at all (general language learning discussion)
+"no" = ONLY if the post explicitly focuses on a language NOT in the list (Chinese, Japanese, Korean, Latin, Arabic, Hindi, etc.), OR has nothing to do with language learning at all.
+When in doubt, say yes.`;
 
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -120,8 +148,8 @@ async function generateReply(post) {
 
 Subreddit: r/${post.subreddit}
 Title: ${post.title}
-Body: ${post.selftext || '(no body)'}
-URL: https://reddit.com${post.permalink}
+Body: ${post.text || '(no body)'}
+URL: ${post.url}
 
 Write a helpful Reddit comment reply. Follow your rules strictly.`;
 
@@ -174,15 +202,15 @@ async function sendTelegram(text) {
 }
 
 function isRelevantPost(post) {
+  // Skip posts without a date
+  if (!post.postedDate) return false;
+
   // Skip posts older than 24h
-  const ageHours = (Date.now() / 1000 - post.created_utc) / 3600;
+  const ageHours = (Date.now() - post.postedDate.getTime()) / (1000 * 3600);
   if (ageHours > 24) return false;
 
-  // Skip removed/deleted
-  if (post.removed_by_category || post.selftext === '[deleted]') return false;
-
-  // Skip posts with too many comments (already crowded)
-  if (post.num_comments > 50) return false;
+  // Skip deleted posts
+  if (post.text === '[deleted]' || post.text === '[removed]') return false;
 
   return true;
 }
@@ -195,60 +223,50 @@ async function main() {
   const seen = loadSeen();
   let newPostsCount = 0;
 
-  for (const query of SEARCH_QUERIES) {
-    console.log(`Searching: "${query}"`);
+  // Fetch all posts in one Apify call
+  const posts = await fetchPostsViaApify();
 
-    const posts = await fetchRedditSearch(query);
-    console.log(`  Found ${posts.length} posts`);
-
-    for (const post of posts) {
-      if (seen[post.id]) continue;
-      if (!isRelevantPost(post)) {
-        seen[post.id] = { skipped: true, ts: Date.now() };
-        continue;
-      }
-
-      console.log(`  New post: "${post.title}" in r/${post.subreddit}`);
-
-      const relevant = await checkRelevance(post);
-      if (!relevant) {
-        console.log(`    Skipped (not relevant)`);
-        seen[post.id] = { skipped: true, ts: Date.now() };
-        continue;
-      }
-
-      const reply = await generateReply(post);
-      if (!reply) {
-        console.error(`  Failed to generate reply, skipping`);
-        continue;
-      }
-
-      const ageHours = ((Date.now() / 1000 - post.created_utc) / 3600).toFixed(1);
-
-      const message = [
-        `🔍 Новый пост для ответа`,
-        ``,
-        `📌 r/${post.subreddit}`,
-        `📝 ${post.title}`,
-        `⏰ ${ageHours}h ago | 💬 ${post.num_comments} comments | ⬆️ ${post.score}`,
-        `🔗 https://reddit.com${post.permalink}`,
-        ``,
-        `--- Черновик ответа ---`,
-        ``,
-        reply,
-      ].join('\n');
-
-      await sendTelegram(message);
-      newPostsCount++;
-
-      seen[post.id] = { title: post.title, ts: Date.now() };
-
-      // Small delay between posts to avoid rate limits
-      await new Promise((r) => setTimeout(r, 3000));
+  for (const post of posts) {
+    if (seen[post.id]) continue;
+    if (!isRelevantPost(post)) {
+      seen[post.id] = { skipped: true, ts: Date.now() };
+      continue;
     }
 
-    // Delay between queries to avoid Reddit rate limit
-    await new Promise((r) => setTimeout(r, 5000));
+    console.log(`  New post: "${post.title}" in r/${post.subreddit}`);
+
+    const relevant = await checkRelevance(post);
+    if (!relevant) {
+      console.log(`    Skipped (not relevant)`);
+      seen[post.id] = { skipped: true, ts: Date.now() };
+      continue;
+    }
+
+    const reply = await generateReply(post);
+    if (!reply) {
+      console.error(`  Failed to generate reply, skipping`);
+      continue;
+    }
+
+    const ageHours = ((Date.now() - post.postedDate.getTime()) / (1000 * 3600)).toFixed(1);
+
+    const info = [
+      `🔍 Новый пост для ответа`,
+      ``,
+      `📌 r/${post.subreddit}`,
+      `📝 ${post.title}`,
+      `⏰ ${ageHours}h ago | 💬 ${post.numComments} comments | ⬆️ ${post.votes}`,
+      `🔗 ${post.url}`,
+    ].join('\n');
+
+    await sendTelegram(info);
+    await sendTelegram(reply);
+    newPostsCount++;
+
+    seen[post.id] = { title: post.title, ts: Date.now() };
+
+    // Small delay between OpenRouter/Telegram calls
+    await new Promise((r) => setTimeout(r, 2000));
   }
 
   // Clean up old entries (older than 7 days)
