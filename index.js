@@ -28,6 +28,8 @@ YOUR RULES:
 6. Write in the same language as the original post (usually English).
 7. Sound like a real person, not a bot. Be warm but not over-the-top.`;
 
+// --- Helpers ---
+
 function loadSeen() {
   try {
     return JSON.parse(fs.readFileSync(SEEN_FILE, 'utf-8'));
@@ -75,7 +77,6 @@ async function fetchPostsViaApify() {
     allPosts.push(...posts);
   }
 
-  // Deduplicate by id
   const unique = new Map();
   for (const item of allPosts) {
     if (item.id && !unique.has(item.id)) {
@@ -83,7 +84,7 @@ async function fetchPostsViaApify() {
     }
   }
 
-  const result = [...unique.values()].map((item) => ({
+  return [...unique.values()].map((item) => ({
     id: item.id,
     title: item.title || '',
     text: item.selfText || '',
@@ -95,13 +96,6 @@ async function fetchPostsViaApify() {
     numComments: item.numComments || 0,
     author: item.author || '',
   }));
-
-  console.log(`Total unique posts: ${result.length}`);
-  if (result.length > 0) {
-    const sample = result[0];
-    console.log(`  Sample normalized: date=${sample.postedDate}, title="${sample.title}", subreddit=${sample.subreddit}`);
-  }
-  return result;
 }
 
 async function checkRelevance(post) {
@@ -180,17 +174,20 @@ Write a helpful Reddit comment reply. Follow your rules strictly.`;
   return data?.choices?.[0]?.message?.content || null;
 }
 
-async function sendTelegram(text) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const chatId = process.env.TELEGRAM_CHAT_ID;
+// --- Telegram ---
 
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+const TG_BASE = () => `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
+const CHAT_ID = () => process.env.TELEGRAM_CHAT_ID;
+
+async function sendTelegram(text, opts = {}) {
+  const res = await fetch(`${TG_BASE()}/sendMessage`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      chat_id: chatId,
+      chat_id: CHAT_ID(),
       text,
       disable_web_page_preview: true,
+      ...opts,
     }),
   });
 
@@ -201,82 +198,165 @@ async function sendTelegram(text) {
   return data;
 }
 
-function isRelevantPost(post) {
-  // Skip posts without a date
-  if (!post.postedDate) return false;
+async function sendMenuButton() {
+  await sendTelegram('👋 Бот запущен! Нажми кнопку чтобы найти новые вопросы.', {
+    reply_markup: JSON.stringify({
+      inline_keyboard: [[
+        { text: '🔍 Найти новые вопросы', callback_data: 'scan' },
+      ]],
+    }),
+  });
+}
 
-  // Skip posts older than 24h
+async function answerCallback(callbackQueryId) {
+  await fetch(`${TG_BASE()}/answerCallbackQuery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ callback_query_id: callbackQueryId }),
+  });
+}
+
+// --- Scan logic ---
+
+function isRelevantPost(post) {
+  if (!post.postedDate) return false;
   const ageHours = (Date.now() - post.postedDate.getTime()) / (1000 * 3600);
   if (ageHours > 24) return false;
-
-  // Skip deleted posts
   if (post.text === '[deleted]' || post.text === '[removed]') return false;
-
   return true;
 }
 
-// --- Main ---
+let isScanning = false;
 
-async function main() {
-  console.log(`[${new Date().toISOString()}] Starting Reddit scout...`);
-
-  const seen = loadSeen();
-  let newPostsCount = 0;
-
-  // Fetch all posts in one Apify call
-  const posts = await fetchPostsViaApify();
-
-  for (const post of posts) {
-    if (seen[post.id]) continue;
-    if (!isRelevantPost(post)) {
-      seen[post.id] = { skipped: true, ts: Date.now() };
-      continue;
-    }
-
-    console.log(`  New post: "${post.title}" in r/${post.subreddit}`);
-
-    const relevant = await checkRelevance(post);
-    if (!relevant) {
-      console.log(`    Skipped (not relevant)`);
-      seen[post.id] = { skipped: true, ts: Date.now() };
-      continue;
-    }
-
-    const reply = await generateReply(post);
-    if (!reply) {
-      console.error(`  Failed to generate reply, skipping`);
-      continue;
-    }
-
-    const ageHours = ((Date.now() - post.postedDate.getTime()) / (1000 * 3600)).toFixed(1);
-
-    const info = [
-      `🔍 Новый пост для ответа`,
-      ``,
-      `📌 r/${post.subreddit}`,
-      `📝 ${post.title}`,
-      `⏰ ${ageHours}h ago | 💬 ${post.numComments} comments | ⬆️ ${post.votes}`,
-      `🔗 ${post.url}`,
-    ].join('\n');
-
-    await sendTelegram(info);
-    await sendTelegram(reply);
-    newPostsCount++;
-
-    seen[post.id] = { title: post.title, ts: Date.now() };
-
-    // Small delay between OpenRouter/Telegram calls
-    await new Promise((r) => setTimeout(r, 2000));
+async function runScan() {
+  if (isScanning) {
+    await sendTelegram('⏳ Поиск уже идёт, подожди...');
+    return;
   }
 
-  // Clean up old entries (older than 7 days)
-  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-  for (const [id, entry] of Object.entries(seen)) {
-    if (entry.ts < weekAgo) delete seen[id];
-  }
+  isScanning = true;
+  console.log(`[${new Date().toISOString()}] Starting scan...`);
+  await sendTelegram('🔄 Ищу новые вопросы...');
 
-  saveSeen(seen);
-  console.log(`Done. New posts found: ${newPostsCount}`);
+  try {
+    const seen = loadSeen();
+    let newPostsCount = 0;
+
+    const posts = await fetchPostsViaApify();
+
+    for (const post of posts) {
+      if (seen[post.id]) continue;
+      if (!isRelevantPost(post)) {
+        seen[post.id] = { skipped: true, ts: Date.now() };
+        continue;
+      }
+
+      console.log(`  New post: "${post.title}" in r/${post.subreddit}`);
+
+      const relevant = await checkRelevance(post);
+      if (!relevant) {
+        console.log(`    Skipped (not relevant)`);
+        seen[post.id] = { skipped: true, ts: Date.now() };
+        continue;
+      }
+
+      const reply = await generateReply(post);
+      if (!reply) {
+        console.error(`  Failed to generate reply, skipping`);
+        continue;
+      }
+
+      const ageHours = ((Date.now() - post.postedDate.getTime()) / (1000 * 3600)).toFixed(1);
+
+      const info = [
+        `🔍 Новый пост для ответа`,
+        ``,
+        `📌 r/${post.subreddit}`,
+        `📝 ${post.title}`,
+        `⏰ ${ageHours}h ago | 💬 ${post.numComments} comments | ⬆️ ${post.votes}`,
+        `🔗 ${post.url}`,
+      ].join('\n');
+
+      await sendTelegram(info);
+      await sendTelegram(reply);
+      newPostsCount++;
+
+      seen[post.id] = { title: post.title, ts: Date.now() };
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+
+    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    for (const [id, entry] of Object.entries(seen)) {
+      if (entry.ts < weekAgo) delete seen[id];
+    }
+
+    saveSeen(seen);
+
+    await sendTelegram(
+      newPostsCount > 0
+        ? `✅ Готово! Найдено новых постов: ${newPostsCount}`
+        : `😴 Новых подходящих постов не найдено`,
+      {
+        reply_markup: JSON.stringify({
+          inline_keyboard: [[
+            { text: '🔍 Найти новые вопросы', callback_data: 'scan' },
+          ]],
+        }),
+      }
+    );
+
+    console.log(`Done. New posts found: ${newPostsCount}`);
+  } catch (err) {
+    console.error('Scan error:', err);
+    await sendTelegram(`❌ Ошибка: ${err.message}`, {
+      reply_markup: JSON.stringify({
+        inline_keyboard: [[
+          { text: '🔍 Попробовать снова', callback_data: 'scan' },
+        ]],
+      }),
+    });
+  } finally {
+    isScanning = false;
+  }
 }
 
-main().catch(console.error);
+// --- Polling ---
+
+async function pollUpdates() {
+  let offset = 0;
+
+  console.log('Bot is running. Send /start in Telegram to see the button.');
+
+  while (true) {
+    try {
+      const res = await fetch(`${TG_BASE()}/getUpdates?offset=${offset}&timeout=30`);
+      const data = await res.json();
+
+      if (!data.ok) {
+        console.error('Polling error:', data);
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+
+      for (const update of data.result) {
+        offset = update.update_id + 1;
+
+        // Handle button click
+        if (update.callback_query?.data === 'scan') {
+          await answerCallback(update.callback_query.id);
+          runScan(); // don't await — run in background
+        }
+
+        // Handle /start command
+        if (update.message?.text === '/start') {
+          await sendMenuButton();
+        }
+      }
+    } catch (err) {
+      console.error('Polling error:', err.message);
+      await new Promise((r) => setTimeout(r, 5000));
+    }
+  }
+}
+
+pollUpdates();
