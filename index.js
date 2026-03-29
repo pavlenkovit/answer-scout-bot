@@ -1,5 +1,11 @@
 require("dotenv").config();
 const db = require("./db");
+const dayjs = require("dayjs");
+const relativeTime = require("dayjs/plugin/relativeTime");
+require("dayjs/locale/ru");
+
+dayjs.extend(relativeTime);
+dayjs.locale("ru");
 
 const PROMPTS = {
   ONBOARD_APP: "onboard_app",
@@ -234,6 +240,20 @@ async function sendTelegram(chatId, text, opts = {}) {
   return data;
 }
 
+/** Native "typing…" in the chat bar; Telegram clears it after ~5s, so refresh for long work. */
+async function sendTelegramChatAction(chatId, action = "typing") {
+  const res = await fetch(`${TG_BASE()}/sendChatAction`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, action }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    console.error("Telegram sendChatAction error:", data);
+  }
+  return data;
+}
+
 async function answerCallback(callbackQueryId) {
   await fetch(`${TG_BASE()}/answerCallbackQuery`, {
     method: "POST",
@@ -286,7 +306,8 @@ function editInstruction(field) {
       );
     case PROMPTS.EDIT_SEARCHES:
       return (
-        "Пришли новые поисковые запросы: каждый с новой строки.\n" + "/cancel — отмена."
+        "Пришли новые поисковые запросы: каждый с новой строки.\n" +
+        "/cancel — отмена."
       );
     default:
       return "Пришли текст одним сообщением или нажми /cancel.";
@@ -309,7 +330,9 @@ async function handleStart(chatId, userId) {
   let row = await db.getOrCreateBotUser(chatId, userId);
   if (!row.setup_complete) {
     if (!row.pending_prompt) {
-      row = await db.updateBotUser(chatId, { pending_prompt: PROMPTS.ONBOARD_APP });
+      row = await db.updateBotUser(chatId, {
+        pending_prompt: PROMPTS.ONBOARD_APP,
+      });
     }
     await sendOnboardingStep(chatId, row.pending_prompt);
     return;
@@ -442,7 +465,10 @@ async function handlePlainText(chatId, text) {
     return;
   }
 
-  await sendTelegram(chatId, "Состояние настройки не распознано. Нажми /start.");
+  await sendTelegram(
+    chatId,
+    "Состояние настройки не распознано. Нажми /start.",
+  );
 }
 
 async function handleCallbackQuery(q) {
@@ -472,7 +498,11 @@ async function handleCallbackQuery(q) {
     return;
   }
 
-  if (data === "edit_app" || data === "edit_writing" || data === "edit_searches") {
+  if (
+    data === "edit_app" ||
+    data === "edit_writing" ||
+    data === "edit_searches"
+  ) {
     const row = await db.getBotUser(chatId);
     if (!row?.setup_complete) {
       await sendTelegram(chatId, "Сначала /start и полная настройка.");
@@ -490,6 +520,10 @@ async function handleCallbackQuery(q) {
 }
 
 // --- Scan ---
+
+function formatPostedAgoRu(postedDate) {
+  return dayjs(postedDate).fromNow();
+}
 
 function isRelevantPost(post) {
   if (!post.postedDate) return false;
@@ -540,10 +574,17 @@ async function runScan(chatId) {
   }
 
   scanningByChat.set(chatId, true);
-  console.log(`[${new Date().toISOString()}] Starting scan for chat ${chatId}...`);
-  await sendTelegram(chatId, "🔄 Ищу новые вопросы...");
+  console.log(
+    `[${new Date().toISOString()}] Starting scan for chat ${chatId}...`,
+  );
 
+  let typingInterval;
   try {
+    await sendTelegramChatAction(chatId, "typing");
+    typingInterval = setInterval(() => {
+      void sendTelegramChatAction(chatId, "typing");
+    }, 4500);
+
     const sinceIso = weekAgoIso();
     const seen = await db.loadSeenMap(chatId, sinceIso);
     let newPostsCount = 0;
@@ -553,7 +594,10 @@ async function runScan(chatId) {
     for (const post of posts) {
       if (seen[post.id]) continue;
       if (!isRelevantPost(post)) {
-        await db.saveSeenPost(chatId, post.id, { skipped: true, ts: Date.now() });
+        await db.saveSeenPost(chatId, post.id, {
+          skipped: true,
+          ts: Date.now(),
+        });
         seen[post.id] = { skipped: true };
         continue;
       }
@@ -563,7 +607,10 @@ async function runScan(chatId) {
       const relevant = await checkRelevance(post, profile);
       if (!relevant) {
         console.log(`    Skipped (not relevant)`);
-        await db.saveSeenPost(chatId, post.id, { skipped: true, ts: Date.now() });
+        await db.saveSeenPost(chatId, post.id, {
+          skipped: true,
+          ts: Date.now(),
+        });
         seen[post.id] = { skipped: true };
         continue;
       }
@@ -574,17 +621,12 @@ async function runScan(chatId) {
         continue;
       }
 
-      const ageHours = (
-        (Date.now() - post.postedDate.getTime()) /
-        (1000 * 3600)
-      ).toFixed(1);
+      const postedAgo = formatPostedAgoRu(post.postedDate);
 
       const info = [
-        `🔥 Новый релевантный тред`,
-        ``,
         `r/${escapeHtml(post.subreddit)}`,
         `<b>${escapeHtml(post.title)}</b>`,
-        `${ageHours}h · ${post.numComments} comments · ↑${post.votes}`,
+        `${escapeHtml(postedAgo)} · ${post.numComments} comments · ↑${post.votes}`,
         escapeHtml(post.url),
       ].join("\n");
 
@@ -617,6 +659,7 @@ async function runScan(chatId) {
       reply_markup: mainMenuMarkup(),
     });
   } finally {
+    if (typingInterval) clearInterval(typingInterval);
     scanningByChat.delete(chatId);
   }
 }
