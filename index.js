@@ -525,6 +525,19 @@ function formatPostedAgoRu(postedDate) {
   return dayjs(postedDate).fromNow();
 }
 
+/** «1 комментарий», «2 комментария», «5 комментариев», «11 комментариев», «21 комментарий» … */
+function ruCommentsPhrase(count) {
+  const n = Math.max(0, Math.floor(Number(count) || 0));
+  const n10 = n % 10;
+  const n100 = n % 100;
+  let word;
+  if (n100 >= 11 && n100 <= 14) word = "комментариев";
+  else if (n10 === 1) word = "комментарий";
+  else if (n10 >= 2 && n10 <= 4) word = "комментария";
+  else word = "комментариев";
+  return `${n} ${word}`;
+}
+
 function isRelevantPost(post) {
   if (!post.postedDate) return false;
   const ageHours = (Date.now() - post.postedDate.getTime()) / (1000 * 3600);
@@ -622,11 +635,12 @@ async function runScan(chatId) {
       }
 
       const postedAgo = formatPostedAgoRu(post.postedDate);
+      const commentsRu = ruCommentsPhrase(post.numComments);
 
       const info = [
         `r/${escapeHtml(post.subreddit)}`,
         `<b>${escapeHtml(post.title)}</b>`,
-        `${escapeHtml(postedAgo)} · ${post.numComments} comments · ↑${post.votes}`,
+        `${escapeHtml(postedAgo)} · ${escapeHtml(commentsRu)} · ↑${post.votes}`,
         escapeHtml(post.url),
       ].join("\n");
 
