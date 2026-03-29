@@ -204,12 +204,17 @@ function settingsMarkup() {
 }
 
 async function sendTelegram(chatId, text, opts = {}) {
+  const bodyText = typeof text === "string" ? text.trim() : "";
+  if (!bodyText) {
+    console.warn("sendTelegram: skipped empty text", { chatId });
+    return { ok: false, description: "empty text skipped" };
+  }
   const res = await fetch(`${TG_BASE()}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: chatId,
-      text,
+      text: bodyText,
       disable_web_page_preview: true,
       ...opts,
     }),
@@ -277,19 +282,20 @@ function editInstruction(field) {
         "Пришли новые поисковые запросы: каждый с новой строки.\n" + "/cancel — отмена."
       );
     default:
-      return "";
+      return "Пришли текст одним сообщением или нажми /cancel.";
   }
 }
 
 async function sendMainMenu(chatId) {
   await sendTelegram(
+    chatId,
     "Готово. Нажми кнопку, чтобы искать новые посты, или открой настройки.",
     { reply_markup: mainMenuMarkup() },
   );
 }
 
 async function sendOnboardingStep(chatId, step) {
-  await sendTelegram(onboardingInstruction(step));
+  await sendTelegram(chatId, onboardingInstruction(step));
 }
 
 async function handleStart(chatId, userId) {
@@ -307,31 +313,36 @@ async function handleStart(chatId, userId) {
 async function handleSettings(chatId) {
   const row = await db.getBotUser(chatId);
   if (!row) {
-    await sendTelegram("Сначала нажми /start и пройди настройку.");
+    await sendTelegram(chatId, "Сначала нажми /start и пройди настройку.");
     return;
   }
   if (!row.setup_complete) {
-    await sendTelegram("Сначала закончи первичную настройку: /start");
+    await sendTelegram(chatId, "Сначала закончи первичную настройку: /start");
     return;
   }
-  await sendTelegram("Что изменить?", { reply_markup: settingsMarkup() });
+  await sendTelegram(chatId, "Что изменить?", {
+    reply_markup: settingsMarkup(),
+  });
 }
 
 async function handleCancel(chatId) {
   const row = await db.getBotUser(chatId);
   if (!row) {
-    await sendTelegram("Нечего отменять. /start");
+    await sendTelegram(chatId, "Нечего отменять. /start");
     return;
   }
   if (!row.pending_prompt) {
-    await sendTelegram("Нет активного ввода. /settings или /start");
+    await sendTelegram(chatId, "Нет активного ввода. /settings или /start");
     return;
   }
   await db.updateBotUser(chatId, { pending_prompt: null });
   if (row.setup_complete) {
-    await sendTelegram("Ок, отменено.", { reply_markup: mainMenuMarkup() });
+    await sendTelegram(chatId, "Ок, отменено.", {
+      reply_markup: mainMenuMarkup(),
+    });
   } else {
     await sendTelegram(
+      chatId,
       "Ввод отменён. Чтобы продолжить настройку — снова /start",
     );
   }
@@ -340,7 +351,7 @@ async function handleCancel(chatId) {
 async function handlePlainText(chatId, text) {
   const row = await db.getBotUser(chatId);
   if (!row || !row.pending_prompt) {
-    await sendTelegram("Нажми /start или /settings.");
+    await sendTelegram(chatId, "Нажми /start или /settings.");
     return;
   }
 
@@ -367,7 +378,10 @@ async function handlePlainText(chatId, text) {
   if (p === PROMPTS.ONBOARD_SEARCHES) {
     const queries = normSearchQueriesFromText(text);
     if (queries.length === 0) {
-      await sendTelegram("Нужен хотя бы один непустой запрос (каждый с новой строки).");
+      await sendTelegram(
+        chatId,
+        "Нужен хотя бы один непустой запрос (каждый с новой строки).",
+      );
       return;
     }
     await db.updateBotUser(chatId, {
@@ -375,9 +389,11 @@ async function handlePlainText(chatId, text) {
       pending_prompt: null,
       setup_complete: true,
     });
-    await sendTelegram("Настройка сохранена в Supabase. Можно менять данные в любой момент в ⚙️ Настройки.", {
-      reply_markup: mainMenuMarkup(),
-    });
+    await sendTelegram(
+      chatId,
+      "Настройка сохранена в Supabase. Можно менять данные в любой момент в ⚙️ Настройки.",
+      { reply_markup: mainMenuMarkup() },
+    );
     return;
   }
 
@@ -386,7 +402,7 @@ async function handlePlainText(chatId, text) {
       app_context: text,
       pending_prompt: null,
     });
-    await sendTelegram("Описание приложения обновлено.", {
+    await sendTelegram(chatId, "Описание приложения обновлено.", {
       reply_markup: mainMenuMarkup(),
     });
     return;
@@ -397,7 +413,7 @@ async function handlePlainText(chatId, text) {
       writing_context: text,
       pending_prompt: null,
     });
-    await sendTelegram("Инструкции по ответам обновлены.", {
+    await sendTelegram(chatId, "Инструкции по ответам обновлены.", {
       reply_markup: mainMenuMarkup(),
     });
     return;
@@ -406,20 +422,20 @@ async function handlePlainText(chatId, text) {
   if (p === PROMPTS.EDIT_SEARCHES) {
     const queries = normSearchQueriesFromText(text);
     if (queries.length === 0) {
-      await sendTelegram("Нужен хотя бы один запрос с новой строки.");
+      await sendTelegram(chatId, "Нужен хотя бы один запрос с новой строки.");
       return;
     }
     await db.updateBotUser(chatId, {
       search_queries: queries,
       pending_prompt: null,
     });
-    await sendTelegram("Поисковые запросы обновлены.", {
+    await sendTelegram(chatId, "Поисковые запросы обновлены.", {
       reply_markup: mainMenuMarkup(),
     });
     return;
   }
 
-  await sendTelegram("Состояние настройки не распознано. Нажми /start.");
+  await sendTelegram(chatId, "Состояние настройки не распознано. Нажми /start.");
 }
 
 async function handleCallbackQuery(q) {
@@ -444,7 +460,7 @@ async function handleCallbackQuery(q) {
     if (row?.setup_complete) {
       await sendMainMenu(chatId);
     } else {
-      await sendTelegram("Сначала заверши настройку: /start");
+      await sendTelegram(chatId, "Сначала заверши настройку: /start");
     }
     return;
   }
@@ -452,7 +468,7 @@ async function handleCallbackQuery(q) {
   if (data === "edit_app" || data === "edit_writing" || data === "edit_searches") {
     const row = await db.getBotUser(chatId);
     if (!row?.setup_complete) {
-      await sendTelegram("Сначала /start и полная настройка.");
+      await sendTelegram(chatId, "Сначала /start и полная настройка.");
       return;
     }
     const map = {
@@ -462,7 +478,7 @@ async function handleCallbackQuery(q) {
     };
     const pending = map[data];
     await db.updateBotUser(chatId, { pending_prompt: pending });
-    await sendTelegram(editInstruction(pending));
+    await sendTelegram(chatId, editInstruction(pending));
   }
 }
 
@@ -495,7 +511,7 @@ async function runScan(chatId) {
     console.error(e);
     await sendTelegram(
       chatId,
-      "❌ Не удалось прочитать профиль из Supabase. Проверь SUPABASE_URL и ключ в .env.",
+      "❌ Не удалось прочитать профиль из Supabase. Проверь SUPABASE_URL и ключ в переменных окружения хоста.",
     );
     return;
   }
@@ -546,8 +562,8 @@ async function runScan(chatId) {
       }
 
       const reply = await generateReply(post, profile);
-      if (!reply) {
-        console.error(`  Failed to generate reply, skipping`);
+      if (!reply || !String(reply).trim()) {
+        console.error(`  Empty or missing reply from model, skipping`);
         continue;
       }
 
@@ -612,6 +628,9 @@ async function pollUpdates() {
     db.getSupabase();
   } catch (e) {
     console.error(e.message);
+    console.error(
+      "На хостинге (Railway, Render, Fly и т.д.) добавь переменные SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY в панели Environment — локальный .env на сервер не подхватывается.",
+    );
     process.exit(1);
   }
 
@@ -625,7 +644,13 @@ async function pollUpdates() {
       const data = await res.json();
 
       if (!data.ok) {
-        console.error("Polling error:", data);
+        if (data.error_code === 409) {
+          console.error(
+            "Telegram 409: с этим токеном уже опрашивается getUpdates (второй инстанс бота, локальный запуск или второй деплой). Оставь один процесс, replicas = 1.",
+          );
+        } else {
+          console.error("Polling error:", data);
+        }
         await new Promise((r) => setTimeout(r, 5000));
         continue;
       }
