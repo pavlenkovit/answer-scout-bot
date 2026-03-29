@@ -1,69 +1,83 @@
-require('dotenv').config();
-const fs = require('fs');
-const path = require('path');
+require("dotenv").config();
+const db = require("./db");
 
-const SEARCH_QUERIES = [
-  'words learning app',
-  'learn language app',
-];
+const PROMPTS = {
+  ONBOARD_APP: "onboard_app",
+  ONBOARD_WRITING: "onboard_writing",
+  ONBOARD_SEARCHES: "onboard_searches",
+  EDIT_APP: "edit_app",
+  EDIT_WRITING: "edit_writing",
+  EDIT_SEARCHES: "edit_searches",
+};
 
-const SEEN_FILE = path.join(__dirname, 'seen_posts.json');
+// --- Prompt builders ---
 
-const SYSTEM_PROMPT = `You are a helpful member of the Reddit community who genuinely loves helping people learn languages. You also happen to be the creator of VibeLing — a vocabulary builder app.
+function buildSystemPrompt(profile) {
+  return `You are a helpful member of the Reddit community who participates genuinely in discussions. You have a product or project you care about and may mention it naturally when it truly fits the conversation.
 
-About VibeLing:
-- Website: https://vibeling.app/
-- iOS: https://apps.apple.com/us/app/vibeling-vocabulary-builder/id6753818507
-- Android: https://play.google.com/store/apps/details?id=com.vitalypavlenko.vibeling
-- Background story (in Russian): https://habr.com/ru/articles/1012012/
-- VibeLing helps learn vocabulary through contextual examples, spaced repetition, and a clean minimal UI
-- It supports multiple languages and focuses on learning words in natural context rather than isolated flashcards
+ABOUT YOUR APP / PROJECT (only state what is given below; do not invent features):
+${profile.app_context?.trim() || "(not specified)"}
 
-YOUR RULES:
-1. FIRST AND FOREMOST — be genuinely helpful. Answer the person's question fully and thoughtfully.
-2. Share practical advice, personal experience, and useful tips that actually help.
-3. ALWAYS mention VibeLing in your reply — but do it naturally and briefly, like a casual recommendation. For example: "I've been using VibeLing for this and it worked well for me" or "You might also check out VibeLing".
-4. Never be pushy or salesy. The goal is to be a valued community member first, but always find a way to naturally weave in VibeLing.
-5. Keep the response concise — 3-6 sentences max. Reddit users don't read walls of text.
-6. Write in the same language as the original post (usually English).
-7. Sound like a real person, not a bot. Be warm but not over-the-top.`;
+HOW TO WRITE REPLIES (follow closely):
+${profile.writing_context?.trim() || "Be concise, helpful, and human. Mention the product only when it fits naturally."}
 
-// --- Helpers ---
-
-function loadSeen() {
-  try {
-    return JSON.parse(fs.readFileSync(SEEN_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
+BASE RULES:
+1. Be genuinely helpful first. Answer the question thoughtfully.
+2. Do not be pushy or salesy. Community value comes first.
+3. Keep replies roughly 3–6 sentences unless the instructions above say otherwise.
+4. Write in the same language as the original post when reasonable.
+5. Sound like a real person: warm, direct, not corporate.`;
 }
 
-function saveSeen(seen) {
-  fs.writeFileSync(SEEN_FILE, JSON.stringify(seen, null, 2));
+function buildRelevancePrompt(post, profile) {
+  const ctx = (profile.app_context || "").slice(0, 2500);
+  return `You filter Reddit posts for someone who might plausibly participate in the thread and mention (when relevant) this product / project:
+
+${ctx || "(no product description provided — be conservative and answer no)"}
+
+Post title: ${post.title}
+Subreddit: r/${post.subreddit}
+Body (excerpt): ${(post.text || "").slice(0, 500)}
+
+Reply with ONLY "yes" or "no" and one short reason.
+"yes" = the post is in a topic area where this product could genuinely help or the discussion is clearly related.
+"no" = off-topic, wrong niche, or mentioning the product would feel like spam.
+When truly uncertain, say yes.`;
 }
 
-async function fetchPostsViaApify() {
+// --- Apify / LLM ---
+
+async function fetchPostsViaApify(searchQueries) {
   const token = process.env.APIFY_API_TOKEN;
+  const queries = Array.isArray(searchQueries)
+    ? searchQueries.map((q) => String(q).trim()).filter(Boolean)
+    : [];
+
+  if (queries.length === 0) {
+    console.warn("Apify: no search queries configured");
+    return [];
+  }
+
   let allPosts = [];
 
-  for (const query of SEARCH_QUERIES) {
+  for (const query of queries) {
     console.log(`Apify search: "${query}"`);
 
     const res = await fetch(
       `https://api.apify.com/v2/acts/automation-lab~reddit-scraper/run-sync-get-dataset-items?token=${token}`,
       {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           searchQuery: query,
-          sort: 'relevance',
-          timeFilter: 'day',
+          sort: "relevance",
+          timeFilter: "day",
           maxPostsPerSource: 20,
           includeComments: false,
           deduplicatePosts: true,
         }),
         signal: AbortSignal.timeout(290000),
-      }
+      },
     );
 
     if (!res.ok) {
@@ -73,7 +87,7 @@ async function fetchPostsViaApify() {
     }
 
     const items = await res.json();
-    const posts = items.filter((item) => item.type === 'post');
+    const posts = items.filter((item) => item.type === "post");
     allPosts.push(...posts);
   }
 
@@ -86,41 +100,30 @@ async function fetchPostsViaApify() {
 
   return [...unique.values()].map((item) => ({
     id: item.id,
-    title: item.title || '',
-    text: item.selfText || '',
-    subreddit: item.subreddit || '',
-    url: item.url || '',
-    permalink: item.permalink || '',
+    title: item.title || "",
+    text: item.selfText || "",
+    subreddit: item.subreddit || "",
+    url: item.url || "",
+    permalink: item.permalink || "",
     postedDate: item.createdAt ? new Date(item.createdAt) : null,
     votes: item.score || 0,
     numComments: item.numComments || 0,
-    author: item.author || '',
+    author: item.author || "",
   }));
 }
 
-async function checkRelevance(post) {
-  const prompt = `Is this Reddit post relevant for someone who could recommend a language/vocabulary learning app?
+async function checkRelevance(post, profile) {
+  const prompt = buildRelevancePrompt(post, profile);
 
-Title: ${post.title}
-Subreddit: r/${post.subreddit}
-Body: ${(post.text || '').slice(0, 500)}
-
-Reply with ONLY "yes" or "no" and a short reason (one sentence).
-"yes" = the post is related to language learning AND either:
-  - mentions one of these languages: English, Spanish, German, French, Romanian, Serbian, Russian
-  - OR does not mention any specific language at all (general language learning discussion)
-"no" = ONLY if the post explicitly focuses on a language NOT in the list (Chinese, Japanese, Korean, Latin, Arabic, Hindi, etc.), OR has nothing to do with language learning at all.
-When in doubt, say yes.`;
-
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'google/gemini-2.5-flash',
-      messages: [{ role: 'user', content: prompt }],
+      model: "google/gemini-2.5-flash",
+      messages: [{ role: "user", content: prompt }],
       max_tokens: 100,
       temperature: 0,
     }),
@@ -132,32 +135,33 @@ When in doubt, say yes.`;
   }
 
   const data = await res.json();
-  const answer = (data?.choices?.[0]?.message?.content || '').toLowerCase();
+  const answer = (data?.choices?.[0]?.message?.content || "").toLowerCase();
   console.log(`    Relevance: ${answer.trim()}`);
-  return answer.startsWith('yes');
+  return answer.startsWith("yes");
 }
 
-async function generateReply(post) {
+async function generateReply(post, profile) {
+  const system = buildSystemPrompt(profile);
   const prompt = `Here is a Reddit post I want you to reply to:
 
 Subreddit: r/${post.subreddit}
 Title: ${post.title}
-Body: ${post.text || '(no body)'}
+Body: ${post.text || "(no body)"}
 URL: ${post.url}
 
 Write a helpful Reddit comment reply. Follow your rules strictly.`;
 
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
     headers: {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
       Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
     },
     body: JSON.stringify({
-      model: 'google/gemini-2.5-flash',
+      model: "google/gemini-2.5-flash",
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: prompt },
+        { role: "system", content: system },
+        { role: "user", content: prompt },
       ],
       max_tokens: 500,
       temperature: 0.7,
@@ -176,15 +180,35 @@ Write a helpful Reddit comment reply. Follow your rules strictly.`;
 
 // --- Telegram ---
 
-const TG_BASE = () => `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
-const CHAT_ID = () => process.env.TELEGRAM_CHAT_ID;
+const TG_BASE = () =>
+  `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}`;
 
-async function sendTelegram(text, opts = {}) {
+function mainMenuMarkup() {
+  return JSON.stringify({
+    inline_keyboard: [
+      [{ text: "🔍 Найти новые вопросы", callback_data: "scan" }],
+      [{ text: "⚙️ Настройки", callback_data: "open_settings" }],
+    ],
+  });
+}
+
+function settingsMarkup() {
+  return JSON.stringify({
+    inline_keyboard: [
+      [{ text: "📱 О приложении", callback_data: "edit_app" }],
+      [{ text: "✍️ Стиль ответов", callback_data: "edit_writing" }],
+      [{ text: "🔎 Поиски Reddit", callback_data: "edit_searches" }],
+      [{ text: "« В меню", callback_data: "back_menu" }],
+    ],
+  });
+}
+
+async function sendTelegram(chatId, text, opts = {}) {
   const res = await fetch(`${TG_BASE()}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      chat_id: CHAT_ID(),
+      chat_id: chatId,
       text,
       disable_web_page_preview: true,
       ...opts,
@@ -193,80 +217,344 @@ async function sendTelegram(text, opts = {}) {
 
   const data = await res.json();
   if (!data.ok) {
-    console.error('Telegram error:', data);
+    console.error("Telegram error:", data);
   }
   return data;
 }
 
-async function sendMenuButton() {
-  await sendTelegram('👋 Бот запущен! Нажми кнопку чтобы найти новые вопросы.', {
-    reply_markup: JSON.stringify({
-      inline_keyboard: [[
-        { text: '🔍 Найти новые вопросы', callback_data: 'scan' },
-      ]],
-    }),
-  });
-}
-
 async function answerCallback(callbackQueryId) {
   await fetch(`${TG_BASE()}/answerCallbackQuery`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ callback_query_id: callbackQueryId }),
   });
 }
 
-// --- Scan logic ---
+function normSearchQueriesFromText(text) {
+  return text
+    .split(/\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function onboardingInstruction(step) {
+  switch (step) {
+    case PROMPTS.ONBOARD_APP:
+      return (
+        "Шаг 1/3 — приложение.\n\n" +
+        "Опиши продукт одним сообщением: название, ссылки (сайт, App Store, Google Play при наличии), чем полезен.\n\n" +
+        "Потом настроим тон ответов и поисковые запросы."
+      );
+    case PROMPTS.ONBOARD_WRITING:
+      return (
+        "Шаг 2/3 — как писать ответы.\n\n" +
+        "Тон, нужно ли всегда упоминать продукт, на каких языках отвечать, чего избегать, длина абзацев — одним сообщением."
+      );
+    case PROMPTS.ONBOARD_SEARCHES:
+      return (
+        "Шаг 3/3 — поиск на Reddit.\n\n" +
+        "Каждый запрос с новой строки (на английском обычно лучше). По ним бот ищет посты через Apify."
+      );
+    default:
+      return "Продолжим настройку. Пришли текст в ответ на последний вопрос или нажми /start.";
+  }
+}
+
+function editInstruction(field) {
+  switch (field) {
+    case PROMPTS.EDIT_APP:
+      return (
+        "Пришли новый текст про приложение — он полностью заменит старый.\n" +
+        "/cancel — отмена."
+      );
+    case PROMPTS.EDIT_WRITING:
+      return (
+        "Пришли новые инструкции по стилю ответов — они полностью заменят старые.\n" +
+        "/cancel — отмена."
+      );
+    case PROMPTS.EDIT_SEARCHES:
+      return (
+        "Пришли новые поисковые запросы: каждый с новой строки.\n" + "/cancel — отмена."
+      );
+    default:
+      return "";
+  }
+}
+
+async function sendMainMenu(chatId) {
+  await sendTelegram(
+    "Готово. Нажми кнопку, чтобы искать новые посты, или открой настройки.",
+    { reply_markup: mainMenuMarkup() },
+  );
+}
+
+async function sendOnboardingStep(chatId, step) {
+  await sendTelegram(onboardingInstruction(step));
+}
+
+async function handleStart(chatId, userId) {
+  let row = await db.getOrCreateBotUser(chatId, userId);
+  if (!row.setup_complete) {
+    if (!row.pending_prompt) {
+      row = await db.updateBotUser(chatId, { pending_prompt: PROMPTS.ONBOARD_APP });
+    }
+    await sendOnboardingStep(chatId, row.pending_prompt);
+    return;
+  }
+  await sendMainMenu(chatId);
+}
+
+async function handleSettings(chatId) {
+  const row = await db.getBotUser(chatId);
+  if (!row) {
+    await sendTelegram("Сначала нажми /start и пройди настройку.");
+    return;
+  }
+  if (!row.setup_complete) {
+    await sendTelegram("Сначала закончи первичную настройку: /start");
+    return;
+  }
+  await sendTelegram("Что изменить?", { reply_markup: settingsMarkup() });
+}
+
+async function handleCancel(chatId) {
+  const row = await db.getBotUser(chatId);
+  if (!row) {
+    await sendTelegram("Нечего отменять. /start");
+    return;
+  }
+  if (!row.pending_prompt) {
+    await sendTelegram("Нет активного ввода. /settings или /start");
+    return;
+  }
+  await db.updateBotUser(chatId, { pending_prompt: null });
+  if (row.setup_complete) {
+    await sendTelegram("Ок, отменено.", { reply_markup: mainMenuMarkup() });
+  } else {
+    await sendTelegram(
+      "Ввод отменён. Чтобы продолжить настройку — снова /start",
+    );
+  }
+}
+
+async function handlePlainText(chatId, text) {
+  const row = await db.getBotUser(chatId);
+  if (!row || !row.pending_prompt) {
+    await sendTelegram("Нажми /start или /settings.");
+    return;
+  }
+
+  const p = row.pending_prompt;
+
+  if (p === PROMPTS.ONBOARD_APP) {
+    await db.updateBotUser(chatId, {
+      app_context: text,
+      pending_prompt: PROMPTS.ONBOARD_WRITING,
+    });
+    await sendOnboardingStep(chatId, PROMPTS.ONBOARD_WRITING);
+    return;
+  }
+
+  if (p === PROMPTS.ONBOARD_WRITING) {
+    await db.updateBotUser(chatId, {
+      writing_context: text,
+      pending_prompt: PROMPTS.ONBOARD_SEARCHES,
+    });
+    await sendOnboardingStep(chatId, PROMPTS.ONBOARD_SEARCHES);
+    return;
+  }
+
+  if (p === PROMPTS.ONBOARD_SEARCHES) {
+    const queries = normSearchQueriesFromText(text);
+    if (queries.length === 0) {
+      await sendTelegram("Нужен хотя бы один непустой запрос (каждый с новой строки).");
+      return;
+    }
+    await db.updateBotUser(chatId, {
+      search_queries: queries,
+      pending_prompt: null,
+      setup_complete: true,
+    });
+    await sendTelegram("Настройка сохранена в Supabase. Можно менять данные в любой момент в ⚙️ Настройки.", {
+      reply_markup: mainMenuMarkup(),
+    });
+    return;
+  }
+
+  if (p === PROMPTS.EDIT_APP) {
+    await db.updateBotUser(chatId, {
+      app_context: text,
+      pending_prompt: null,
+    });
+    await sendTelegram("Описание приложения обновлено.", {
+      reply_markup: mainMenuMarkup(),
+    });
+    return;
+  }
+
+  if (p === PROMPTS.EDIT_WRITING) {
+    await db.updateBotUser(chatId, {
+      writing_context: text,
+      pending_prompt: null,
+    });
+    await sendTelegram("Инструкции по ответам обновлены.", {
+      reply_markup: mainMenuMarkup(),
+    });
+    return;
+  }
+
+  if (p === PROMPTS.EDIT_SEARCHES) {
+    const queries = normSearchQueriesFromText(text);
+    if (queries.length === 0) {
+      await sendTelegram("Нужен хотя бы один запрос с новой строки.");
+      return;
+    }
+    await db.updateBotUser(chatId, {
+      search_queries: queries,
+      pending_prompt: null,
+    });
+    await sendTelegram("Поисковые запросы обновлены.", {
+      reply_markup: mainMenuMarkup(),
+    });
+    return;
+  }
+
+  await sendTelegram("Состояние настройки не распознано. Нажми /start.");
+}
+
+async function handleCallbackQuery(q) {
+  const chatId = q.message?.chat?.id;
+  if (chatId == null) return;
+
+  const data = q.data;
+  await answerCallback(q.id);
+
+  if (data === "scan") {
+    runScan(chatId);
+    return;
+  }
+
+  if (data === "open_settings") {
+    await handleSettings(chatId);
+    return;
+  }
+
+  if (data === "back_menu") {
+    const row = await db.getBotUser(chatId);
+    if (row?.setup_complete) {
+      await sendMainMenu(chatId);
+    } else {
+      await sendTelegram("Сначала заверши настройку: /start");
+    }
+    return;
+  }
+
+  if (data === "edit_app" || data === "edit_writing" || data === "edit_searches") {
+    const row = await db.getBotUser(chatId);
+    if (!row?.setup_complete) {
+      await sendTelegram("Сначала /start и полная настройка.");
+      return;
+    }
+    const map = {
+      edit_app: PROMPTS.EDIT_APP,
+      edit_writing: PROMPTS.EDIT_WRITING,
+      edit_searches: PROMPTS.EDIT_SEARCHES,
+    };
+    const pending = map[data];
+    await db.updateBotUser(chatId, { pending_prompt: pending });
+    await sendTelegram(editInstruction(pending));
+  }
+}
+
+// --- Scan ---
 
 function isRelevantPost(post) {
   if (!post.postedDate) return false;
   const ageHours = (Date.now() - post.postedDate.getTime()) / (1000 * 3600);
   if (ageHours > 24) return false;
-  if (post.text === '[deleted]' || post.text === '[removed]') return false;
+  if (post.text === "[deleted]" || post.text === "[removed]") return false;
   return true;
 }
 
-let isScanning = false;
+const scanningByChat = new Map();
 
-async function runScan() {
-  if (isScanning) {
-    await sendTelegram('⏳ Поиск уже идёт, подожди...');
+function weekAgoIso() {
+  return new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+}
+
+async function runScan(chatId) {
+  if (scanningByChat.get(chatId)) {
+    await sendTelegram(chatId, "⏳ Поиск уже идёт, подожди...");
     return;
   }
 
-  isScanning = true;
-  console.log(`[${new Date().toISOString()}] Starting scan...`);
-  await sendTelegram('🔄 Ищу новые вопросы...');
+  let profile;
+  try {
+    profile = await db.getBotUser(chatId);
+  } catch (e) {
+    console.error(e);
+    await sendTelegram(
+      chatId,
+      "❌ Не удалось прочитать профиль из Supabase. Проверь SUPABASE_URL и ключ в .env.",
+    );
+    return;
+  }
+
+  if (!profile?.setup_complete) {
+    await sendTelegram(chatId, "Сначала закончи настройку: /start");
+    return;
+  }
+
+  const queries = Array.isArray(profile.search_queries)
+    ? profile.search_queries
+    : [];
+  if (queries.length === 0) {
+    await sendTelegram(
+      chatId,
+      "Нет поисковых запросов. Открой ⚙️ Настройки → Поиски Reddit.",
+    );
+    return;
+  }
+
+  scanningByChat.set(chatId, true);
+  console.log(`[${new Date().toISOString()}] Starting scan for chat ${chatId}...`);
+  await sendTelegram(chatId, "🔄 Ищу новые вопросы...");
 
   try {
-    const seen = loadSeen();
+    const sinceIso = weekAgoIso();
+    const seen = await db.loadSeenMap(chatId, sinceIso);
     let newPostsCount = 0;
 
-    const posts = await fetchPostsViaApify();
+    const posts = await fetchPostsViaApify(queries);
 
     for (const post of posts) {
       if (seen[post.id]) continue;
       if (!isRelevantPost(post)) {
-        seen[post.id] = { skipped: true, ts: Date.now() };
+        await db.saveSeenPost(chatId, post.id, { skipped: true, ts: Date.now() });
+        seen[post.id] = { skipped: true };
         continue;
       }
 
       console.log(`  New post: "${post.title}" in r/${post.subreddit}`);
 
-      const relevant = await checkRelevance(post);
+      const relevant = await checkRelevance(post, profile);
       if (!relevant) {
         console.log(`    Skipped (not relevant)`);
-        seen[post.id] = { skipped: true, ts: Date.now() };
+        await db.saveSeenPost(chatId, post.id, { skipped: true, ts: Date.now() });
+        seen[post.id] = { skipped: true };
         continue;
       }
 
-      const reply = await generateReply(post);
+      const reply = await generateReply(post, profile);
       if (!reply) {
         console.error(`  Failed to generate reply, skipping`);
         continue;
       }
 
-      const ageHours = ((Date.now() - post.postedDate.getTime()) / (1000 * 3600)).toFixed(1);
+      const ageHours = (
+        (Date.now() - post.postedDate.getTime()) /
+        (1000 * 3600)
+      ).toFixed(1);
 
       const info = [
         `🔍 Новый пост для ответа`,
@@ -275,65 +563,69 @@ async function runScan() {
         `📝 ${post.title}`,
         `⏰ ${ageHours}h ago | 💬 ${post.numComments} comments | ⬆️ ${post.votes}`,
         `🔗 ${post.url}`,
-      ].join('\n');
+      ].join("\n");
 
-      await sendTelegram(info);
-      await sendTelegram(reply);
+      await sendTelegram(chatId, info);
+      await sendTelegram(chatId, reply);
       newPostsCount++;
 
-      seen[post.id] = { title: post.title, ts: Date.now() };
+      await db.saveSeenPost(chatId, post.id, {
+        title: post.title,
+        ts: Date.now(),
+      });
+      seen[post.id] = {};
       await new Promise((r) => setTimeout(r, 2000));
     }
 
-    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    for (const [id, entry] of Object.entries(seen)) {
-      if (entry.ts < weekAgo) delete seen[id];
-    }
-
-    saveSeen(seen);
+    await db.pruneSeenBefore(chatId, sinceIso);
 
     await sendTelegram(
+      chatId,
       newPostsCount > 0
         ? `✅ Готово! Найдено новых постов: ${newPostsCount}`
         : `😴 Новых подходящих постов не найдено`,
-      {
-        reply_markup: JSON.stringify({
-          inline_keyboard: [[
-            { text: '🔍 Найти новые вопросы', callback_data: 'scan' },
-          ]],
-        }),
-      }
+      { reply_markup: mainMenuMarkup() },
     );
 
-    console.log(`Done. New posts found: ${newPostsCount}`);
+    console.log(`Done. New posts for ${chatId}: ${newPostsCount}`);
   } catch (err) {
-    console.error('Scan error:', err);
-    await sendTelegram(`❌ Ошибка: ${err.message}`, {
-      reply_markup: JSON.stringify({
-        inline_keyboard: [[
-          { text: '🔍 Попробовать снова', callback_data: 'scan' },
-        ]],
-      }),
+    console.error("Scan error:", err);
+    await sendTelegram(chatId, `❌ Ошибка: ${err.message}`, {
+      reply_markup: mainMenuMarkup(),
     });
   } finally {
-    isScanning = false;
+    scanningByChat.delete(chatId);
   }
 }
 
 // --- Polling ---
 
+function normalizeCommand(text) {
+  const first = text.trim().split(/\s+/)[0] || "";
+  return first.split("@")[0].toLowerCase();
+}
+
 async function pollUpdates() {
   let offset = 0;
 
-  console.log('Bot is running. Send /start in Telegram to see the button.');
+  try {
+    db.getSupabase();
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+
+  console.log("Bot is running. Send /start in Telegram.");
 
   while (true) {
     try {
-      const res = await fetch(`${TG_BASE()}/getUpdates?offset=${offset}&timeout=30`);
+      const res = await fetch(
+        `${TG_BASE()}/getUpdates?offset=${offset}&timeout=30`,
+      );
       const data = await res.json();
 
       if (!data.ok) {
-        console.error('Polling error:', data);
+        console.error("Polling error:", data);
         await new Promise((r) => setTimeout(r, 5000));
         continue;
       }
@@ -341,19 +633,43 @@ async function pollUpdates() {
       for (const update of data.result) {
         offset = update.update_id + 1;
 
-        // Handle button click
-        if (update.callback_query?.data === 'scan') {
-          await answerCallback(update.callback_query.id);
-          runScan(); // don't await — run in background
+        if (update.callback_query) {
+          await handleCallbackQuery(update.callback_query);
+          continue;
         }
 
-        // Handle /start command
-        if (update.message?.text === '/start') {
-          await sendMenuButton();
+        const msg = update.message;
+        const text = msg?.text?.trim();
+        if (!text || msg?.chat?.id == null) continue;
+
+        const chatId = msg.chat.id;
+        const userId = msg.from?.id ?? chatId;
+        const cmd = normalizeCommand(text);
+
+        if (cmd === "/start") {
+          await handleStart(chatId, userId);
+          continue;
         }
+        if (cmd === "/settings") {
+          await handleSettings(chatId);
+          continue;
+        }
+        if (cmd === "/cancel") {
+          await handleCancel(chatId);
+          continue;
+        }
+        if (text.startsWith("/")) {
+          await sendTelegram(
+            chatId,
+            "Неизвестная команда. Доступны: /start /settings /cancel",
+          );
+          continue;
+        }
+
+        await handlePlainText(chatId, text);
       }
     } catch (err) {
-      console.error('Polling error:', err.message);
+      console.error("Polling error:", err.message);
       await new Promise((r) => setTimeout(r, 5000));
     }
   }
