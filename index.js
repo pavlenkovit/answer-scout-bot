@@ -10,6 +10,13 @@ const PROMPTS = {
   EDIT_SEARCHES: "edit_searches",
 };
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 // --- Prompt builders ---
 
 function buildSystemPrompt(profile) {
@@ -573,15 +580,15 @@ async function runScan(chatId) {
       ).toFixed(1);
 
       const info = [
-        `🔍 Новый пост для ответа`,
+        `🔥 Новый релевантный тред`,
         ``,
-        `📌 r/${post.subreddit}`,
-        `📝 ${post.title}`,
-        `⏰ ${ageHours}h ago | 💬 ${post.numComments} comments | ⬆️ ${post.votes}`,
-        `🔗 ${post.url}`,
+        `r/${escapeHtml(post.subreddit)}`,
+        `<b>${escapeHtml(post.title)}</b>`,
+        `${ageHours}h · ${post.numComments} comments · ↑${post.votes}`,
+        escapeHtml(post.url),
       ].join("\n");
 
-      await sendTelegram(chatId, info);
+      await sendTelegram(chatId, info, { parse_mode: "HTML" });
       await sendTelegram(chatId, reply);
       newPostsCount++;
 
