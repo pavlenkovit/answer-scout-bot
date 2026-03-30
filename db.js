@@ -40,6 +40,7 @@ async function getOrCreateBotUser(chatId, userId) {
       app_context: "",
       writing_context: "",
       search_queries: [],
+      search_queries_app_hash: null,
       setup_complete: false,
       pending_prompt: "onboard_app",
     })

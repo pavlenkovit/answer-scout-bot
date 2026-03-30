@@ -7,6 +7,7 @@ create table if not exists public.bot_users (
   app_context text not null default '',
   writing_context text not null default '',
   search_queries jsonb not null default '[]'::jsonb,
+  search_queries_app_hash text,
   setup_complete boolean not null default false,
   pending_prompt text,
   completed_scan_count integer not null default 0,
@@ -16,6 +17,7 @@ create table if not exists public.bot_users (
 
 -- Старые проекты без колонки: строка ниже идемпотентна (можно выполнять повторно).
 alter table public.bot_users add column if not exists completed_scan_count integer not null default 0;
+alter table public.bot_users add column if not exists search_queries_app_hash text;
 
 create index if not exists bot_users_setup_idx on public.bot_users (setup_complete);
 

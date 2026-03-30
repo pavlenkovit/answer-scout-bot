@@ -59,6 +59,94 @@ Reply with ONLY "yes" or "no" and one short reason.
 When truly uncertain, say yes.`;
 }
 
+function buildSearchQuerySetsPrompt(appContext) {
+  const ctx = String(appContext || "").trim().slice(0, 4000);
+  return `You generate Reddit search queries (for finding QUESTION posts).
+
+Use the product description below. Do NOT invent features; only use what's stated.
+
+Return EXACTLY this JSON object (and nothing else):
+{
+  "sets": [
+    ["<query1>", "<query2>", "<query3>", "<query4>"],
+    ["<query1>", "<query2>", "<query3>", "<query4>"],
+    ["<query1>", "<query2>", "<query3>", "<query4>"]
+  ]
+}
+
+Rules:
+- Exactly 3 sets.
+- Each set must contain 4-6 unique short queries.
+- Prefer English queries (Reddit search usually works better in English). Keep the product name as-is if it is not Latin.
+- Queries should be question-style: how to, what is, is it worth it, problems, troubleshooting, alternatives, vs, does it work for...
+- Each query should be <= 80 characters and not include quotes.
+- No duplicates across all queries.
+
+Set meaning:
+1) how-to / setup / usage
+2) problems / troubleshooting / drawbacks
+3) comparisons / alternatives / value-for-money
+
+PRODUCT DESCRIPTION:
+${ctx || "(not specified)"}`;
+}
+
+function extractFirstJsonObject(text) {
+  const s = String(text || "").trim();
+  const firstBrace = s.indexOf("{");
+  const lastBrace = s.lastIndexOf("}");
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
+  const candidate = s.slice(firstBrace, lastBrace + 1);
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    return null;
+  }
+}
+
+function flattenAndDedupeQueries(querySets) {
+  const flat = [];
+  for (const set of Array.isArray(querySets) ? querySets : []) {
+    for (const q of Array.isArray(set) ? set : []) {
+      const qq = String(q || "").trim();
+      if (!qq) continue;
+      if (qq.length > 200) continue;
+      flat.push(qq);
+    }
+  }
+  // Deduplicate case-insensitively, keep first.
+  const seen = new Set();
+  const out = [];
+  for (const q of flat) {
+    const key = q.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(q);
+  }
+  // Apify loops queries and can be slow; keep it bounded.
+  return out.slice(0, 18);
+}
+
+function truncateForLog(s, maxLen = 2000) {
+  const str = String(s ?? "");
+  if (str.length <= maxLen) return str;
+  return `${str.slice(0, maxLen)}\n... (truncated, total chars: ${str.length})`;
+}
+
+function logOpenRouterRequest(label, { model, messages, max_tokens, temperature }) {
+  console.log(`[OpenRouter:${label}] model=${model} max_tokens=${max_tokens} temperature=${temperature}`);
+  if (Array.isArray(messages)) {
+    console.log(
+      `[OpenRouter:${label}] messages:`,
+      messages.map((m) => ({
+        role: m?.role,
+        content_chars: String(m?.content ?? "").length,
+        content: truncateForLog(m?.content ?? "", 2200),
+      }))
+    );
+  }
+}
+
 // --- Apify / LLM ---
 
 async function fetchPostsViaApify(searchQueries) {
@@ -129,6 +217,13 @@ async function fetchPostsViaApify(searchQueries) {
 async function checkRelevance(post, profile) {
   const prompt = buildRelevancePrompt(post, profile);
 
+  logOpenRouterRequest("relevance_check", {
+    model: "google/gemini-2.5-flash",
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: 100,
+    temperature: 0,
+  });
+
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -165,6 +260,16 @@ URL: ${post.url}
 
 Write a helpful Reddit comment reply. Follow your rules strictly.`;
 
+  logOpenRouterRequest("reply_generation", {
+    model: "google/gemini-2.5-flash",
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: prompt },
+    ],
+    max_tokens: 500,
+    temperature: 0.7,
+  });
+
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -192,6 +297,66 @@ Write a helpful Reddit comment reply. Follow your rules strictly.`;
   return data?.choices?.[0]?.message?.content || null;
 }
 
+async function generateSearchQuerySets(appContext) {
+  const prompt = buildSearchQuerySetsPrompt(appContext);
+
+  logOpenRouterRequest("search_query_sets_generation", {
+    model: "google/gemini-2.5-flash",
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: 500,
+    temperature: 0.2,
+  });
+
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: "google/gemini-2.5-flash",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 500,
+      temperature: 0.2,
+    }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    console.error(
+      `OpenRouter search query generation error: ${res.status} ${text}`,
+    );
+    return { sets: [] };
+  }
+
+  const data = await res.json();
+  const content = data?.choices?.[0]?.message?.content || "";
+  const json = extractFirstJsonObject(content);
+
+  const sets = json?.sets;
+  if (!Array.isArray(sets)) {
+    console.error("OpenRouter search query generation: invalid JSON", {
+      content,
+    });
+    return { sets: [] };
+  }
+
+  const normalizedSets = sets
+    .slice(0, 3)
+    .map((set) => (Array.isArray(set) ? set : []))
+    .map((set) =>
+      set
+        .map((q) => String(q || "").trim())
+        .filter(Boolean)
+        .map((q) => (q.length > 120 ? q.slice(0, 120) : q)),
+    );
+
+  // Ensure exactly 3 arrays (Apify expects flat string queries later).
+  while (normalizedSets.length < 3) normalizedSets.push([]);
+
+  return { sets: normalizedSets.slice(0, 3) };
+}
+
 // --- Telegram ---
 
 const TG_BASE = () =>
@@ -211,7 +376,6 @@ function settingsMarkup() {
     inline_keyboard: [
       [{ text: "🚀 Информация о продукте", callback_data: "edit_app" }],
       [{ text: "💬 Как писать ответы", callback_data: "edit_writing" }],
-      [{ text: "🔎 Критерии поиска вопросов", callback_data: "edit_searches" }],
       [{ text: "« В меню", callback_data: "back_menu" }],
     ],
   });
@@ -414,17 +578,6 @@ async function requestPaidScan(chatId) {
     return;
   }
 
-  const queries = Array.isArray(profile.search_queries)
-    ? profile.search_queries
-    : [];
-  if (queries.length === 0) {
-    await sendTelegram(
-      chatId,
-      "Нет поисковых запросов. Открой ⚙️ Настройки → Поиски Reddit.",
-    );
-    return;
-  }
-
   const used = Math.max(0, Math.floor(Number(profile.completed_scan_count) || 0));
   if (FREE_SCANS > 0 && used < FREE_SCANS) {
     void runScan(chatId);
@@ -447,7 +600,7 @@ function onboardingInstruction(step) {
       return (
         "Шаг 1/3 — приложение.\n\n" +
         "Опиши продукт одним сообщением: название, ссылки (сайт, App Store, Google Play при наличии), чем полезен.\n\n" +
-        "Потом настроим тон ответов и поисковые запросы."
+        "Потом настроим тон ответов. Поисковые запросы я подберу сам перед первым поиском."
       );
     case PROMPTS.ONBOARD_WRITING:
       return (
@@ -457,7 +610,7 @@ function onboardingInstruction(step) {
     case PROMPTS.ONBOARD_SEARCHES:
       return (
         "Шаг 3/3 — поиск на Reddit.\n\n" +
-        "Каждый запрос с новой строки (на английском обычно лучше)"
+        "Поисковые запросы подбираются автоматически на основе описания продукта."
       );
     default:
       return "Продолжим настройку. Пришли текст в ответ на последний вопрос или нажми /start.";
@@ -506,7 +659,7 @@ function buildEditSnapshotMessage(field, row) {
       break;
     case PROMPTS.EDIT_SEARCHES: {
       heading =
-        "🔎 Критерии поиска вопросов — сейчас сохранено (одна строка = один запрос):";
+        "🔎 Поисковые запросы — сейчас сохранено (одна строка = один запрос):";
       const q = Array.isArray(row.search_queries) ? row.search_queries : [];
       body = q.length
         ? q
@@ -613,29 +766,27 @@ async function handlePlainText(chatId, text) {
   if (p === PROMPTS.ONBOARD_WRITING) {
     await db.updateBotUser(chatId, {
       writing_context: text,
-      pending_prompt: PROMPTS.ONBOARD_SEARCHES,
-    });
-    await sendOnboardingStep(chatId, PROMPTS.ONBOARD_SEARCHES);
-    return;
-  }
-
-  if (p === PROMPTS.ONBOARD_SEARCHES) {
-    const queries = normSearchQueriesFromText(text);
-    if (queries.length === 0) {
-      await sendTelegram(
-        chatId,
-        "Нужен хотя бы один непустой запрос (каждый с новой строки).",
-      );
-      return;
-    }
-    await db.updateBotUser(chatId, {
-      search_queries: queries,
       pending_prompt: null,
       setup_complete: true,
     });
     await sendTelegram(
       chatId,
-      "Настройка сохранена в Supabase. Можно менять данные в любой момент в ⚙️ Настройки.",
+      "Настройка сохранена. Поисковые запросы подберутся автоматически при первом запуске поиска.",
+      { reply_markup: mainMenuMarkup() },
+    );
+    return;
+  }
+
+  if (p === PROMPTS.ONBOARD_SEARCHES) {
+    const queries = normSearchQueriesFromText(text);
+    await db.updateBotUser(chatId, {
+      ...(queries.length > 0 ? { search_queries: queries } : {}),
+      pending_prompt: null,
+      setup_complete: true,
+    });
+    await sendTelegram(
+      chatId,
+      "Настройка сохранена в Supabase. Поисковые запросы будут выбраны автоматически при первом запуске поиска.",
       { reply_markup: mainMenuMarkup() },
     );
     return;
@@ -644,6 +795,8 @@ async function handlePlainText(chatId, text) {
   if (p === PROMPTS.EDIT_APP) {
     await db.updateBotUser(chatId, {
       app_context: text,
+      search_queries: [],
+      search_queries_app_hash: null,
       pending_prompt: null,
     });
     await sendTelegram(chatId, "Описание приложения обновлено.", {
@@ -664,18 +817,13 @@ async function handlePlainText(chatId, text) {
   }
 
   if (p === PROMPTS.EDIT_SEARCHES) {
-    const queries = normSearchQueriesFromText(text);
-    if (queries.length === 0) {
-      await sendTelegram(chatId, "Нужен хотя бы один запрос с новой строки.");
-      return;
-    }
-    await db.updateBotUser(chatId, {
-      search_queries: queries,
-      pending_prompt: null,
-    });
-    await sendTelegram(chatId, "Поисковые запросы обновлены.", {
-      reply_markup: mainMenuMarkup(),
-    });
+    // Поисковые запросы больше не запрашиваем у пользователя.
+    await db.updateBotUser(chatId, { pending_prompt: null });
+    await sendTelegram(
+      chatId,
+      "Поисковые запросы теперь подбираются автоматически по описанию продукта.",
+      { reply_markup: mainMenuMarkup() },
+    );
     return;
   }
 
@@ -722,10 +870,16 @@ async function handleCallbackQuery(q) {
       await sendTelegram(chatId, "Сначала /start и полная настройка.");
       return;
     }
+    if (data === "edit_searches") {
+      await sendTelegram(
+        chatId,
+        "Поисковые запросы теперь подбираются автоматически на основе описания продукта.",
+      );
+      return;
+    }
     const map = {
       edit_app: PROMPTS.EDIT_APP,
       edit_writing: PROMPTS.EDIT_WRITING,
-      edit_searches: PROMPTS.EDIT_SEARCHES,
     };
     const pending = map[data];
     await db.updateBotUser(chatId, { pending_prompt: pending });
@@ -793,15 +947,40 @@ async function runScan(chatId) {
     return;
   }
 
-  const queries = Array.isArray(profile.search_queries)
-    ? profile.search_queries
-    : [];
-  if (queries.length === 0) {
-    await sendTelegram(
-      chatId,
-      "Нет поисковых запросов. Открой ⚙️ Настройки → Поиски Reddit.",
-    );
+  const appContext = String(profile.app_context || "").trim();
+  if (!appContext) {
+    await sendTelegram(chatId, "Нет описания продукта — пройди /start снова.");
     return;
+  }
+
+  const appHash = crypto
+    .createHash("sha256")
+    .update(appContext)
+    .digest("hex");
+  const hasExistingQueries =
+    Array.isArray(profile.search_queries) && profile.search_queries.length > 0;
+  const storedHash = profile.search_queries_app_hash || null;
+  const shouldGenerate =
+    !hasExistingQueries || (storedHash && storedHash !== appHash);
+
+  let queries;
+  if (shouldGenerate) {
+    await sendTelegram(chatId, "Подбираю поисковые запросы по описанию продукта...");
+    const generated = await generateSearchQuerySets(appContext);
+    queries = flattenAndDedupeQueries(generated.sets);
+    if (queries.length === 0) {
+      await sendTelegram(
+        chatId,
+        "Не удалось сгенерировать поисковые запросы. Попробуй позже."
+      );
+      return;
+    }
+    await db.updateBotUser(chatId, {
+      search_queries: queries,
+      search_queries_app_hash: appHash,
+    });
+  } else {
+    queries = Array.isArray(profile.search_queries) ? profile.search_queries : [];
   }
 
   scanningByChat.set(chatId, true);
