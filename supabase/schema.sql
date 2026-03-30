@@ -9,9 +9,13 @@ create table if not exists public.bot_users (
   search_queries jsonb not null default '[]'::jsonb,
   setup_complete boolean not null default false,
   pending_prompt text,
+  completed_scan_count integer not null default 0,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Старые проекты без колонки: строка ниже идемпотентна (можно выполнять повторно).
+alter table public.bot_users add column if not exists completed_scan_count integer not null default 0;
 
 create index if not exists bot_users_setup_idx on public.bot_users (setup_complete);
 

@@ -108,6 +108,12 @@ async function pruneSeenBefore(chatId, beforeIso) {
   if (error) throw error;
 }
 
+async function incrementCompletedScanCount(chatId) {
+  const row = await getBotUser(chatId);
+  const n = Math.max(0, Math.floor(Number(row?.completed_scan_count) || 0));
+  return updateBotUser(chatId, { completed_scan_count: n + 1 });
+}
+
 module.exports = {
   getSupabase,
   getBotUser,
@@ -116,4 +122,5 @@ module.exports = {
   loadSeenMap,
   saveSeenPost,
   pruneSeenBefore,
+  incrementCompletedScanCount,
 };

@@ -1,4 +1,5 @@
 require("dotenv").config();
+const crypto = require("crypto");
 const db = require("./db");
 const dayjs = require("dayjs");
 const relativeTime = require("dayjs/plugin/relativeTime");
@@ -262,6 +263,177 @@ async function answerCallback(callbackQueryId) {
   });
 }
 
+// --- Telegram Stars: один запуск поиска = N ⭐ (digital goods, валюта XTR) ---
+
+const SCAN_PRICE_STARS = Math.max(
+  1,
+  Math.min(
+    100_000,
+    Number.parseInt(process.env.SCAN_COST_STARS || "5", 10) || 5,
+  ),
+);
+
+/** Сколько первых успешных поисков без Stars (0 = сразу только платно). */
+const FREE_SCANS = Math.max(
+  0,
+  Math.min(
+    10_000,
+    Number.parseInt(process.env.FREE_SCANS_COUNT || "3", 10) || 3,
+  ),
+);
+
+const pendingScanInvoices = new Map(); // invoice payload -> { chatId, at }
+const PENDING_INVOICE_TTL_MS = 60 * 60 * 1000;
+
+function prunePendingScanInvoices() {
+  const now = Date.now();
+  for (const [payload, v] of pendingScanInvoices) {
+    if (now - v.at > PENDING_INVOICE_TTL_MS) pendingScanInvoices.delete(payload);
+  }
+}
+
+function registerPendingScanInvoice(chatId) {
+  prunePendingScanInvoices();
+  const token = crypto.randomBytes(12).toString("hex");
+  const payload = `scan:${chatId}:${token}`;
+  pendingScanInvoices.set(payload, { chatId, at: Date.now() });
+  return payload;
+}
+
+async function answerPreCheckoutQuery(preCheckoutQueryId, ok, errorMessage) {
+  const body = ok
+    ? { pre_checkout_query_id: preCheckoutQueryId, ok: true }
+    : {
+        pre_checkout_query_id: preCheckoutQueryId,
+        ok: false,
+        error_message: errorMessage || "Платёж отклонён.",
+      };
+  const res = await fetch(`${TG_BASE()}/answerPreCheckoutQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    console.error("answerPreCheckoutQuery error:", data);
+  }
+  return data;
+}
+
+async function sendScanStarsInvoice(chatId) {
+  const payload = registerPendingScanInvoice(chatId);
+  const res = await fetch(`${TG_BASE()}/sendInvoice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      title: "Поиск на Reddit",
+      description: `Один запуск поиска по твоим запросам — ${SCAN_PRICE_STARS} ⭐`,
+      payload,
+      provider_token: "",
+      currency: "XTR",
+      prices: [{ label: "Запуск поиска", amount: SCAN_PRICE_STARS }],
+    }),
+  });
+  const data = await res.json();
+  if (!data.ok) {
+    pendingScanInvoices.delete(payload);
+    console.error("sendInvoice error:", data);
+    await sendTelegram(
+      chatId,
+      "Не удалось выставить счёт. В @BotFather → твой бот → Payments включи приём Stars для цифровых товаров.",
+    );
+  }
+  return data;
+}
+
+async function handlePreCheckoutQuery(q) {
+  const id = q.id;
+  const payload = q.invoice_payload;
+  const currency = q.currency;
+  const total = q.total_amount;
+  const fromId = q.from?.id;
+
+  const fail = (msg) => answerPreCheckoutQuery(id, false, msg);
+
+  prunePendingScanInvoices();
+  if (currency !== "XTR" || total !== SCAN_PRICE_STARS) {
+    await fail("Неверная сумма или валюта.");
+    return;
+  }
+  const pending = pendingScanInvoices.get(payload);
+  if (!pending || pending.chatId !== fromId) {
+    await fail("Счёт устарел. Нажми «Найти новые вопросы» снова.");
+    return;
+  }
+  await answerPreCheckoutQuery(id, true);
+}
+
+async function handleSuccessfulScanPayment(msg) {
+  const sp = msg.successful_payment;
+  if (!sp) return;
+  const payload = sp.invoice_payload;
+  const chatId = msg.chat.id;
+
+  if (sp.currency !== "XTR" || sp.total_amount !== SCAN_PRICE_STARS) {
+    console.warn("successful_payment: unexpected amount/currency", sp);
+    return;
+  }
+
+  prunePendingScanInvoices();
+  const pending = pendingScanInvoices.get(payload);
+  if (!pending || pending.chatId !== chatId) {
+    console.warn("successful_payment: unknown or stale payload");
+    return;
+  }
+  pendingScanInvoices.delete(payload);
+  void runScan(chatId);
+}
+
+/** Проверки как у runScan, затем счёт Stars; поиск стартует после successful_payment. */
+async function requestPaidScan(chatId) {
+  if (scanningByChat.get(chatId)) {
+    await sendTelegram(chatId, "⏳ Поиск уже идёт, подожди...");
+    return;
+  }
+
+  let profile;
+  try {
+    profile = await db.getBotUser(chatId);
+  } catch (e) {
+    console.error(e);
+    await sendTelegram(
+      chatId,
+      "❌ Не удалось прочитать профиль из Supabase. Проверь SUPABASE_URL и ключ в переменных окружения хоста.",
+    );
+    return;
+  }
+
+  if (!profile?.setup_complete) {
+    await sendTelegram(chatId, "Сначала закончи настройку: /start");
+    return;
+  }
+
+  const queries = Array.isArray(profile.search_queries)
+    ? profile.search_queries
+    : [];
+  if (queries.length === 0) {
+    await sendTelegram(
+      chatId,
+      "Нет поисковых запросов. Открой ⚙️ Настройки → Поиски Reddit.",
+    );
+    return;
+  }
+
+  const used = Math.max(0, Math.floor(Number(profile.completed_scan_count) || 0));
+  if (FREE_SCANS > 0 && used < FREE_SCANS) {
+    void runScan(chatId);
+    return;
+  }
+
+  await sendScanStarsInvoice(chatId);
+}
+
 function normSearchQueriesFromText(text) {
   return text
     .split(/\n/)
@@ -521,7 +693,7 @@ async function handleCallbackQuery(q) {
   await answerCallback(q.id);
 
   if (data === "scan") {
-    runScan(chatId);
+    await requestPaidScan(chatId);
     return;
   }
 
@@ -704,11 +876,25 @@ async function runScan(chatId) {
 
     await db.pruneSeenBefore(chatId, sinceIso);
 
+    await db.incrementCompletedScanCount(chatId);
+    const afterRow = await db.getBotUser(chatId);
+    const totalScans = Math.max(
+      0,
+      Math.floor(Number(afterRow?.completed_scan_count) || 0),
+    );
+    const freeLeft = Math.max(0, FREE_SCANS - totalScans);
+    let scanQuotaHint = "";
+    if (FREE_SCANS > 0 && freeLeft > 0) {
+      scanQuotaHint = `\n\n🎁 Бесплатных поисков осталось: ${freeLeft}.`;
+    } else if (FREE_SCANS > 0 && totalScans === FREE_SCANS) {
+      scanQuotaHint = `\n\nДальше каждый поиск — ${SCAN_PRICE_STARS} ⭐.`;
+    }
+
     await sendTelegram(
       chatId,
-      newPostsCount > 0
+      (newPostsCount > 0
         ? `✅ Готово! Найдено новых постов: ${newPostsCount}`
-        : `😴 Новых подходящих постов не найдено`,
+        : `😴 Новых подходящих постов не найдено`) + scanQuotaHint,
       { reply_markup: mainMenuMarkup() },
     );
 
@@ -768,12 +954,22 @@ async function pollUpdates() {
       for (const update of data.result) {
         offset = update.update_id + 1;
 
+        if (update.pre_checkout_query) {
+          await handlePreCheckoutQuery(update.pre_checkout_query);
+          continue;
+        }
+
         if (update.callback_query) {
           await handleCallbackQuery(update.callback_query);
           continue;
         }
 
         const msg = update.message;
+        if (msg?.chat?.id != null && msg.successful_payment) {
+          await handleSuccessfulScanPayment(msg);
+          continue;
+        }
+
         const text = msg?.text?.trim();
         if (!text || msg?.chat?.id == null) continue;
 
