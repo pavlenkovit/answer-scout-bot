@@ -208,9 +208,9 @@ function mainMenuMarkup() {
 function settingsMarkup() {
   return JSON.stringify({
     inline_keyboard: [
-      [{ text: "📱 О приложении", callback_data: "edit_app" }],
-      [{ text: "✍️ Стиль ответов", callback_data: "edit_writing" }],
-      [{ text: "🔎 Поиски Reddit", callback_data: "edit_searches" }],
+      [{ text: "🚀 Информация о продукте", callback_data: "edit_app" }],
+      [{ text: "💬 Как писать ответы", callback_data: "edit_writing" }],
+      [{ text: "🔎 Критерии поиска вопросов", callback_data: "edit_searches" }],
       [{ text: "« В меню", callback_data: "back_menu" }],
     ],
   });
@@ -285,7 +285,7 @@ function onboardingInstruction(step) {
     case PROMPTS.ONBOARD_SEARCHES:
       return (
         "Шаг 3/3 — поиск на Reddit.\n\n" +
-        "Каждый запрос с новой строки (на английском обычно лучше). По ним бот ищет посты через Apify."
+        "Каждый запрос с новой строки (на английском обычно лучше)"
       );
     default:
       return "Продолжим настройку. Пришли текст в ответ на последний вопрос или нажми /start.";
@@ -296,22 +296,64 @@ function editInstruction(field) {
   switch (field) {
     case PROMPTS.EDIT_APP:
       return (
-        "Пришли новый текст про приложение — он полностью заменит старый.\n" +
+        "Пришли новый текст одним сообщением — он полностью заменит сохранённое.\n" +
+        "Можешь скопировать из сообщения выше, изменить и отправить сюда.\n" +
         "/cancel — отмена."
       );
     case PROMPTS.EDIT_WRITING:
       return (
-        "Пришли новые инструкции по стилю ответов — они полностью заменят старые.\n" +
+        "Пришли новые инструкции одним сообщением — они полностью заменят сохранённые.\n" +
+        "Можешь скопировать из сообщения выше, изменить и отправить сюда.\n" +
         "/cancel — отмена."
       );
     case PROMPTS.EDIT_SEARCHES:
       return (
-        "Пришли новые поисковые запросы: каждый с новой строки.\n" +
+        "Пришли новый список: каждый запрос с новой строки — он полностью заменит сохранённый.\n" +
+        "Можешь скопировать из сообщения выше, изменить и отправить сюда.\n" +
         "/cancel — отмена."
       );
     default:
       return "Пришли текст одним сообщением или нажми /cancel.";
   }
+}
+
+const EDIT_SNAPSHOT_BODY_MAX = 3200;
+
+/** Показать текущее значение перед редактированием (поле ввода в Telegram предзаполнить нельзя). */
+function buildEditSnapshotMessage(field, row) {
+  let heading;
+  let body;
+  switch (field) {
+    case PROMPTS.EDIT_APP:
+      heading = "🚀 Информация о продукте — сейчас сохранено:";
+      body = String(row.app_context ?? "").trim() || "(пусто)";
+      break;
+    case PROMPTS.EDIT_WRITING:
+      heading = "💬 Как писать ответы — сейчас сохранено:";
+      body = String(row.writing_context ?? "").trim() || "(пусто)";
+      break;
+    case PROMPTS.EDIT_SEARCHES: {
+      heading =
+        "🔎 Критерии поиска вопросов — сейчас сохранено (одна строка = один запрос):";
+      const q = Array.isArray(row.search_queries) ? row.search_queries : [];
+      body = q.length
+        ? q
+            .map((s) => String(s).trim())
+            .filter(Boolean)
+            .join("\n")
+        : "(пусто)";
+      break;
+    }
+    default:
+      return null;
+  }
+  let suffix = "";
+  if (body.length > EDIT_SNAPSHOT_BODY_MAX) {
+    body = body.slice(0, EDIT_SNAPSHOT_BODY_MAX);
+    suffix =
+      "\n\n… Показан только фрагмент — в новом сообщении пришли полный текст целиком.";
+  }
+  return `${heading}\n\n${body}${suffix}`;
 }
 
 async function sendMainMenu(chatId) {
@@ -515,6 +557,10 @@ async function handleCallbackQuery(q) {
     };
     const pending = map[data];
     await db.updateBotUser(chatId, { pending_prompt: pending });
+    const snapshot = buildEditSnapshotMessage(pending, row);
+    if (snapshot) {
+      await sendTelegram(chatId, snapshot);
+    }
     await sendTelegram(chatId, editInstruction(pending));
   }
 }
