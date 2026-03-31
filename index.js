@@ -10,10 +10,7 @@ dayjs.locale("ru");
 
 const PROMPTS = {
   ONBOARD_APP: "onboard_app",
-  ONBOARD_WRITING: "onboard_writing",
-  ONBOARD_SEARCHES: "onboard_searches",
   EDIT_APP: "edit_app",
-  EDIT_WRITING: "edit_writing",
   EDIT_SEARCHES: "edit_searches",
 };
 
@@ -27,20 +24,20 @@ function escapeHtml(s) {
 // --- Prompt builders ---
 
 function buildSystemPrompt(profile) {
-  return `You are a helpful member of the Reddit community who participates genuinely in discussions. You have a product or project you care about and may mention it naturally when it truly fits the conversation.
+  return `You are a real person on Reddit who genuinely uses the product described below. You participate in discussions to help others based on your own experience.
 
-ABOUT YOUR APP / PROJECT (only state what is given below; do not invent features):
+YOUR PRODUCT (only state what is given below; do not invent features):
 ${profile.app_context?.trim() || "(not specified)"}
 
-HOW TO WRITE REPLIES (follow closely):
-${profile.writing_context?.trim() || "Be concise, helpful, and human. Mention the product only when it fits naturally."}
-
-BASE RULES:
-1. Be genuinely helpful first. Answer the question thoughtfully.
-2. Do not be pushy or salesy. Community value comes first.
-3. Keep replies under 200 words. Match length to the question — a simple question deserves a short answer (2–3 sentences), a complex one can be longer but still concise.
-4. Write in the same language as the original post when reasonable.
-5. Sound like a real person: warm, direct, not corporate.`;
+RULES:
+1. Answer the specific question or problem in the post first. Be concretely helpful.
+2. Write from personal experience: "I use …", "What worked for me …", "I switched to … and …".
+3. ALWAYS mention the product by name in your reply. If the context allows, include a link. Never skip the product mention.
+4. Keep replies under 200 words. Match length to the question — a simple question gets 2–3 sentences, a complex one can be longer but still concise.
+5. Do not be pushy or salesy. Help first, mention the product as a natural part of your answer.
+6. Write in the same language as the original post.
+7. Sound like a real person: warm, direct, no corporate speak, no bullet-point lists, no "As someone who…" openers.
+8. Do not invent features or capabilities not described above.`;
 }
 
 function buildRelevancePrompt(post, profile) {
@@ -383,7 +380,6 @@ function settingsMarkup() {
   return JSON.stringify({
     inline_keyboard: [
       [{ text: "🚀 Информация о продукте", callback_data: "edit_app" }],
-      [{ text: "💬 Как писать ответы", callback_data: "edit_writing" }],
       [{ text: "« В меню", callback_data: "back_menu" }],
     ],
   });
@@ -610,19 +606,8 @@ function onboardingInstruction(step) {
   switch (step) {
     case PROMPTS.ONBOARD_APP:
       return (
-        "Шаг 1/3 — приложение.\n\n" +
-        "Опиши продукт одним сообщением: название, ссылки (сайт, App Store, Google Play при наличии), чем полезен.\n\n" +
-        "Потом настроим тон ответов. Поисковые запросы я подберу сам перед первым поиском."
-      );
-    case PROMPTS.ONBOARD_WRITING:
-      return (
-        "Шаг 2/3 — как писать ответы.\n\n" +
-        "Тон, нужно ли всегда упоминать продукт, на каких языках отвечать, чего избегать, длина абзацев — одним сообщением."
-      );
-    case PROMPTS.ONBOARD_SEARCHES:
-      return (
-        "Шаг 3/3 — поиск на Reddit.\n\n" +
-        "Поисковые запросы подбираются автоматически на основе описания продукта."
+        "Опиши свой продукт одним сообщением: название, ссылки (сайт, App Store, Google Play при наличии), чем полезен.\n\n" +
+        "Поисковые запросы и стиль ответов подберутся автоматически."
       );
     default:
       return "Продолжим настройку. Пришли текст в ответ на последний вопрос или нажми /start.";
@@ -634,12 +619,6 @@ function editInstruction(field) {
     case PROMPTS.EDIT_APP:
       return (
         "Пришли новый текст одним сообщением — он полностью заменит сохранённое.\n" +
-        "Можешь скопировать из сообщения выше, изменить и отправить сюда.\n" +
-        "/cancel — отмена."
-      );
-    case PROMPTS.EDIT_WRITING:
-      return (
-        "Пришли новые инструкции одним сообщением — они полностью заменят сохранённые.\n" +
         "Можешь скопировать из сообщения выше, изменить и отправить сюда.\n" +
         "/cancel — отмена."
       );
@@ -664,10 +643,6 @@ function buildEditSnapshotMessage(field, row) {
     case PROMPTS.EDIT_APP:
       heading = "🚀 Информация о продукте — сейчас сохранено:";
       body = String(row.app_context ?? "").trim() || "(пусто)";
-      break;
-    case PROMPTS.EDIT_WRITING:
-      heading = "💬 Как писать ответы — сейчас сохранено:";
-      body = String(row.writing_context ?? "").trim() || "(пусто)";
       break;
     case PROMPTS.EDIT_SEARCHES: {
       heading =
@@ -769,36 +744,12 @@ async function handlePlainText(chatId, text) {
   if (p === PROMPTS.ONBOARD_APP) {
     await db.updateBotUser(chatId, {
       app_context: text,
-      pending_prompt: PROMPTS.ONBOARD_WRITING,
-    });
-    await sendOnboardingStep(chatId, PROMPTS.ONBOARD_WRITING);
-    return;
-  }
-
-  if (p === PROMPTS.ONBOARD_WRITING) {
-    await db.updateBotUser(chatId, {
-      writing_context: text,
       pending_prompt: null,
       setup_complete: true,
     });
     await sendTelegram(
       chatId,
-      "Настройка сохранена. Поисковые запросы подберутся автоматически при первом запуске поиска.",
-      { reply_markup: mainMenuMarkup() },
-    );
-    return;
-  }
-
-  if (p === PROMPTS.ONBOARD_SEARCHES) {
-    const queries = normSearchQueriesFromText(text);
-    await db.updateBotUser(chatId, {
-      ...(queries.length > 0 ? { search_queries: queries } : {}),
-      pending_prompt: null,
-      setup_complete: true,
-    });
-    await sendTelegram(
-      chatId,
-      "Настройка сохранена в Supabase. Поисковые запросы будут выбраны автоматически при первом запуске поиска.",
+      "Готово! Поисковые запросы подберутся автоматически при первом поиске.",
       { reply_markup: mainMenuMarkup() },
     );
     return;
@@ -812,17 +763,6 @@ async function handlePlainText(chatId, text) {
       pending_prompt: null,
     });
     await sendTelegram(chatId, "Описание приложения обновлено.", {
-      reply_markup: mainMenuMarkup(),
-    });
-    return;
-  }
-
-  if (p === PROMPTS.EDIT_WRITING) {
-    await db.updateBotUser(chatId, {
-      writing_context: text,
-      pending_prompt: null,
-    });
-    await sendTelegram(chatId, "Инструкции по ответам обновлены.", {
       reply_markup: mainMenuMarkup(),
     });
     return;
@@ -872,11 +812,7 @@ async function handleCallbackQuery(q) {
     return;
   }
 
-  if (
-    data === "edit_app" ||
-    data === "edit_writing" ||
-    data === "edit_searches"
-  ) {
+  if (data === "edit_app" || data === "edit_searches") {
     const row = await db.getBotUser(chatId);
     if (!row?.setup_complete) {
       await sendTelegram(chatId, "Сначала /start и полная настройка.");
@@ -889,11 +825,7 @@ async function handleCallbackQuery(q) {
       );
       return;
     }
-    const map = {
-      edit_app: PROMPTS.EDIT_APP,
-      edit_writing: PROMPTS.EDIT_WRITING,
-    };
-    const pending = map[data];
+    const pending = PROMPTS.EDIT_APP;
     await db.updateBotUser(chatId, { pending_prompt: pending });
     const snapshot = buildEditSnapshotMessage(pending, row);
     if (snapshot) {
