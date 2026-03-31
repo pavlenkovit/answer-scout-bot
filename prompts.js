@@ -50,17 +50,18 @@ Return EXACTLY this JSON object (and nothing else):
 
 Rules:
 - Exactly 2 sets.
-- Each set must contain 4-6 unique short queries.
-- Prefer English queries (Reddit search usually works better in English). Keep the product name as-is if it is not Latin.
-- Queries should be question-style: how to, what is, is it worth it, problems, troubleshooting, alternatives, vs, does it work for...
+- Each set must contain 4-5 unique short queries.
+- NEVER include the product name, brand name, or any identifiable product terms in queries. Queries must be generic niche/problem queries so we find people who don't yet know about this product.
+- Prefer English queries (Reddit search usually works better in English).
+- Queries should be question-style: how to, what is, best way to, problems with, alternatives to [competitor category], recommendations for...
 - Each query should be <= 80 characters and not include quotes.
 - No duplicates across all queries.
 
-Pick the 2 most relevant angles for the product below. Examples of possible angles:
-- how-to / setup / usage
-- problems / troubleshooting / drawbacks
-- comparisons / alternatives / value-for-money
-- recommendations / "what app for X"
+Pick the 2 most relevant angles for the product's niche below. Examples of possible angles:
+- how-to / setup / usage problems in this niche
+- pain points / frustrations users have in this area
+- recommendations / "what app for X" / "best tool for X"
+- comparisons / alternatives in the category
 - workflows / integrations
 
 PRODUCT DESCRIPTION:

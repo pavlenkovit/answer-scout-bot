@@ -62,7 +62,7 @@ function flattenAndDedupeQueries(querySets) {
     out.push(q);
   }
   // Apify loops queries and can be slow; keep it bounded.
-  return out.slice(0, 12);
+  return out.slice(0, 10);
 }
 
 // --- Apify / LLM ---
