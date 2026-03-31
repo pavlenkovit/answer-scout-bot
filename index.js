@@ -749,6 +749,7 @@ async function runScan(chatId) {
 
     const sinceIso = weekAgoIso();
     const seen = await db.loadSeenMap(chatId, sinceIso);
+    const MAX_POSTS_PER_SCAN = 10;
     let sentCount = 0;
     let relevantCount = 0;
     let alreadySeenCount = 0;
@@ -756,6 +757,7 @@ async function runScan(chatId) {
     const posts = await fetchPostsViaApify(queries);
 
     for (const post of posts) {
+      if (sentCount >= MAX_POSTS_PER_SCAN) break;
       if (seen[post.id]) {
         alreadySeenCount++;
         continue;
@@ -829,17 +831,11 @@ async function runScan(chatId) {
       scanQuotaHint = `\n\nДальше каждый поиск — ${SCAN_PRICE_STARS} ⭐.`;
     }
 
-    const summary = [
-      `Релевантных постов: ${relevantCount + alreadySeenCount}`,
-      `Уже показаны ранее: ${alreadySeenCount}`,
-      `Отправлено сейчас: ${sentCount}`,
-    ].join("\n");
-
     await sendTelegram(
       chatId,
       (sentCount > 0
-        ? `✅ Готово!\n\n${summary}`
-        : `😴 Новых подходящих постов не найдено\n\n${summary}`) +
+        ? `✅ Готово! Отправлено постов: ${sentCount}`
+        : `😴 Новых подходящих постов не найдено. Возможно, вы недавно уже искали — повторите позже, когда появятся новые посты.`) +
         scanQuotaHint,
       { reply_markup: mainMenuMarkup() },
     );

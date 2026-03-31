@@ -27,9 +27,9 @@ Subreddit: r/${post.subreddit}
 Body (excerpt): ${(post.text || "").slice(0, 500)}
 
 Reply with ONLY "yes" or "no" and one short reason.
-"yes" = the post is in a topic area where this product could genuinely help or the discussion is clearly related.
-"no" = off-topic, wrong niche, or mentioning the product would feel like spam.
-When truly uncertain, say yes.`;
+"yes" = the post asks a specific question or describes a problem that this product directly solves. The product mention would feel natural and helpful.
+"no" = off-topic, only loosely related, wrong niche, too broad, or mentioning the product would feel forced or spammy.
+Be strict: when uncertain, say no. Only pass posts where the product is a genuinely good fit.`;
 }
 
 function buildSearchQuerySetsPrompt(appContext) {
