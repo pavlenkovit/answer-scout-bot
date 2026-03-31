@@ -762,25 +762,13 @@ async function runScan(chatId) {
         alreadySeenCount++;
         continue;
       }
-      if (!isRelevantPost(post)) {
-        await db.saveSeenPost(chatId, post.id, {
-          skipped: true,
-          ts: Date.now(),
-        });
-        seen[post.id] = { skipped: true };
-        continue;
-      }
+      if (!isRelevantPost(post)) continue;
 
       console.log(`  New post: "${post.title}" in r/${post.subreddit}`);
 
       const relevant = await checkRelevance(post, profile);
       if (!relevant) {
         console.log(`    Skipped (not relevant)`);
-        await db.saveSeenPost(chatId, post.id, {
-          skipped: true,
-          ts: Date.now(),
-        });
-        seen[post.id] = { skipped: true };
         continue;
       }
 
