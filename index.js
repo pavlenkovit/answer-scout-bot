@@ -60,7 +60,9 @@ When truly uncertain, say yes.`;
 }
 
 function buildSearchQuerySetsPrompt(appContext) {
-  const ctx = String(appContext || "").trim().slice(0, 4000);
+  const ctx = String(appContext || "")
+    .trim()
+    .slice(0, 4000);
   return `You generate Reddit search queries (for finding QUESTION posts).
 
 Use the product description below. Do NOT invent features; only use what's stated.
@@ -69,23 +71,24 @@ Return EXACTLY this JSON object (and nothing else):
 {
   "sets": [
     ["<query1>", "<query2>", "<query3>", "<query4>"],
-    ["<query1>", "<query2>", "<query3>", "<query4>"],
     ["<query1>", "<query2>", "<query3>", "<query4>"]
   ]
 }
 
 Rules:
-- Exactly 3 sets.
+- Exactly 2 sets.
 - Each set must contain 4-6 unique short queries.
 - Prefer English queries (Reddit search usually works better in English). Keep the product name as-is if it is not Latin.
 - Queries should be question-style: how to, what is, is it worth it, problems, troubleshooting, alternatives, vs, does it work for...
 - Each query should be <= 80 characters and not include quotes.
 - No duplicates across all queries.
 
-Set meaning:
-1) how-to / setup / usage
-2) problems / troubleshooting / drawbacks
-3) comparisons / alternatives / value-for-money
+Pick the 2 most relevant angles for the product below. Examples of possible angles:
+- how-to / setup / usage
+- problems / troubleshooting / drawbacks
+- comparisons / alternatives / value-for-money
+- recommendations / "what app for X"
+- workflows / integrations
 
 PRODUCT DESCRIPTION:
 ${ctx || "(not specified)"}`;
@@ -95,7 +98,8 @@ function extractFirstJsonObject(text) {
   const s = String(text || "").trim();
   const firstBrace = s.indexOf("{");
   const lastBrace = s.lastIndexOf("}");
-  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace) return null;
+  if (firstBrace === -1 || lastBrace === -1 || lastBrace <= firstBrace)
+    return null;
   const candidate = s.slice(firstBrace, lastBrace + 1);
   try {
     return JSON.parse(candidate);
@@ -124,7 +128,7 @@ function flattenAndDedupeQueries(querySets) {
     out.push(q);
   }
   // Apify loops queries and can be slow; keep it bounded.
-  return out.slice(0, 18);
+  return out.slice(0, 12);
 }
 
 function truncateForLog(s, maxLen = 2000) {
@@ -133,8 +137,13 @@ function truncateForLog(s, maxLen = 2000) {
   return `${str.slice(0, maxLen)}\n... (truncated, total chars: ${str.length})`;
 }
 
-function logOpenRouterRequest(label, { model, messages, max_tokens, temperature }) {
-  console.log(`[OpenRouter:${label}] model=${model} max_tokens=${max_tokens} temperature=${temperature}`);
+function logOpenRouterRequest(
+  label,
+  { model, messages, max_tokens, temperature },
+) {
+  console.log(
+    `[OpenRouter:${label}] model=${model} max_tokens=${max_tokens} temperature=${temperature}`,
+  );
   if (Array.isArray(messages)) {
     console.log(
       `[OpenRouter:${label}] messages:`,
@@ -142,7 +151,7 @@ function logOpenRouterRequest(label, { model, messages, max_tokens, temperature 
         role: m?.role,
         content_chars: String(m?.content ?? "").length,
         content: truncateForLog(m?.content ?? "", 2200),
-      }))
+      })),
     );
   }
 }
@@ -342,7 +351,7 @@ async function generateSearchQuerySets(appContext) {
   }
 
   const normalizedSets = sets
-    .slice(0, 3)
+    .slice(0, 2)
     .map((set) => (Array.isArray(set) ? set : []))
     .map((set) =>
       set
@@ -351,10 +360,9 @@ async function generateSearchQuerySets(appContext) {
         .map((q) => (q.length > 120 ? q.slice(0, 120) : q)),
     );
 
-  // Ensure exactly 3 arrays (Apify expects flat string queries later).
-  while (normalizedSets.length < 3) normalizedSets.push([]);
+  while (normalizedSets.length < 2) normalizedSets.push([]);
 
-  return { sets: normalizedSets.slice(0, 3) };
+  return { sets: normalizedSets.slice(0, 2) };
 }
 
 // --- Telegram ---
@@ -452,7 +460,8 @@ const PENDING_INVOICE_TTL_MS = 60 * 60 * 1000;
 function prunePendingScanInvoices() {
   const now = Date.now();
   for (const [payload, v] of pendingScanInvoices) {
-    if (now - v.at > PENDING_INVOICE_TTL_MS) pendingScanInvoices.delete(payload);
+    if (now - v.at > PENDING_INVOICE_TTL_MS)
+      pendingScanInvoices.delete(payload);
   }
 }
 
@@ -578,7 +587,10 @@ async function requestPaidScan(chatId) {
     return;
   }
 
-  const used = Math.max(0, Math.floor(Number(profile.completed_scan_count) || 0));
+  const used = Math.max(
+    0,
+    Math.floor(Number(profile.completed_scan_count) || 0),
+  );
   if (FREE_SCANS > 0 && used < FREE_SCANS) {
     void runScan(chatId);
     return;
@@ -953,10 +965,7 @@ async function runScan(chatId) {
     return;
   }
 
-  const appHash = crypto
-    .createHash("sha256")
-    .update(appContext)
-    .digest("hex");
+  const appHash = crypto.createHash("sha256").update(appContext).digest("hex");
   const hasExistingQueries =
     Array.isArray(profile.search_queries) && profile.search_queries.length > 0;
   const storedHash = profile.search_queries_app_hash || null;
@@ -965,13 +974,16 @@ async function runScan(chatId) {
 
   let queries;
   if (shouldGenerate) {
-    await sendTelegram(chatId, "Подбираю поисковые запросы по описанию продукта...");
+    await sendTelegram(
+      chatId,
+      "Подбираю поисковые запросы по описанию продукта...",
+    );
     const generated = await generateSearchQuerySets(appContext);
     queries = flattenAndDedupeQueries(generated.sets);
     if (queries.length === 0) {
       await sendTelegram(
         chatId,
-        "Не удалось сгенерировать поисковые запросы. Попробуй позже."
+        "Не удалось сгенерировать поисковые запросы. Попробуй позже.",
       );
       return;
     }
@@ -980,7 +992,9 @@ async function runScan(chatId) {
       search_queries_app_hash: appHash,
     });
   } else {
-    queries = Array.isArray(profile.search_queries) ? profile.search_queries : [];
+    queries = Array.isArray(profile.search_queries)
+      ? profile.search_queries
+      : [];
   }
 
   scanningByChat.set(chatId, true);
