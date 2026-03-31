@@ -11,7 +11,6 @@ dayjs.locale("ru");
 const PROMPTS = {
   ONBOARD_APP: "onboard_app",
   EDIT_APP: "edit_app",
-  EDIT_SEARCHES: "edit_searches",
 };
 
 function escapeHtml(s) {
@@ -64,31 +63,6 @@ function flattenAndDedupeQueries(querySets) {
   }
   // Apify loops queries and can be slow; keep it bounded.
   return out.slice(0, 12);
-}
-
-function truncateForLog(s, maxLen = 2000) {
-  const str = String(s ?? "");
-  if (str.length <= maxLen) return str;
-  return `${str.slice(0, maxLen)}\n... (truncated, total chars: ${str.length})`;
-}
-
-function logOpenRouterRequest(
-  label,
-  { model, messages, max_tokens, temperature },
-) {
-  console.log(
-    `[OpenRouter:${label}] model=${model} max_tokens=${max_tokens} temperature=${temperature}`,
-  );
-  if (Array.isArray(messages)) {
-    console.log(
-      `[OpenRouter:${label}] messages:`,
-      messages.map((m) => ({
-        role: m?.role,
-        content_chars: String(m?.content ?? "").length,
-        content: truncateForLog(m?.content ?? "", 2200),
-      })),
-    );
-  }
 }
 
 // --- Apify / LLM ---
@@ -161,13 +135,6 @@ async function fetchPostsViaApify(searchQueries) {
 async function checkRelevance(post, profile) {
   const prompt = buildRelevancePrompt(post, profile);
 
-  logOpenRouterRequest("relevance_check", {
-    model: "google/gemini-2.5-flash",
-    messages: [{ role: "user", content: prompt }],
-    max_tokens: 100,
-    temperature: 0,
-  });
-
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -204,16 +171,6 @@ URL: ${post.url}
 
 Write a helpful Reddit comment reply. Follow your rules strictly.`;
 
-  logOpenRouterRequest("reply_generation", {
-    model: "google/gemini-2.5-flash",
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: prompt },
-    ],
-    max_tokens: 500,
-    temperature: 0.7,
-  });
-
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -243,13 +200,6 @@ Write a helpful Reddit comment reply. Follow your rules strictly.`;
 
 async function generateSearchQuerySets(appContext) {
   const prompt = buildSearchQuerySetsPrompt(appContext);
-
-  logOpenRouterRequest("search_query_sets_generation", {
-    model: "google/gemini-2.5-flash",
-    messages: [{ role: "user", content: prompt }],
-    max_tokens: 500,
-    temperature: 0.2,
-  });
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -425,8 +375,8 @@ async function sendScanStarsInvoice(chatId) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       chat_id: chatId,
-      title: "Поиск на Reddit",
-      description: `Один запуск поиска по твоим запросам — ${SCAN_PRICE_STARS} ⭐`,
+      title: "Поиск и генерация ответов для Reddit",
+      description: `Один запуск поиска и генерации ответов — ${SCAN_PRICE_STARS} ⭐`,
       payload,
       provider_token: "",
       currency: "XTR",
@@ -528,7 +478,7 @@ function onboardingInstruction(step) {
   switch (step) {
     case PROMPTS.ONBOARD_APP:
       return (
-        "Опиши свой продукт одним сообщением: название, ссылки (сайт, App Store, Google Play при наличии), чем полезен.\n\n" +
+        "Опиши свой продукт одним сообщением: название, ссылки (сайт, App Store, Google Play при наличии), чем полезен, какая проблема решалась и как создавался продукт. Чем больше информацции, тем релевантнее будут найденные посты и тем лучше будут ответы на них.\n\n" +
         "Поисковые запросы и стиль ответов подберутся автоматически."
       );
     default:
@@ -541,12 +491,6 @@ function editInstruction(field) {
     case PROMPTS.EDIT_APP:
       return (
         "Пришли новый текст одним сообщением — он полностью заменит сохранённое.\n" +
-        "Можешь скопировать из сообщения выше, изменить и отправить сюда.\n" +
-        "/cancel — отмена."
-      );
-    case PROMPTS.EDIT_SEARCHES:
-      return (
-        "Пришли новый список: каждый запрос с новой строки — он полностью заменит сохранённый.\n" +
         "Можешь скопировать из сообщения выше, изменить и отправить сюда.\n" +
         "/cancel — отмена."
       );
@@ -566,18 +510,6 @@ function buildEditSnapshotMessage(field, row) {
       heading = "🚀 Информация о продукте — сейчас сохранено:";
       body = String(row.app_context ?? "").trim() || "(пусто)";
       break;
-    case PROMPTS.EDIT_SEARCHES: {
-      heading =
-        "🔎 Поисковые запросы — сейчас сохранено (одна строка = один запрос):";
-      const q = Array.isArray(row.search_queries) ? row.search_queries : [];
-      body = q.length
-        ? q
-            .map((s) => String(s).trim())
-            .filter(Boolean)
-            .join("\n")
-        : "(пусто)";
-      break;
-    }
     default:
       return null;
   }
@@ -675,17 +607,6 @@ async function handlePlainText(chatId, text) {
     return;
   }
 
-  if (p === PROMPTS.EDIT_SEARCHES) {
-    // Поисковые запросы больше не запрашиваем у пользователя.
-    await db.updateBotUser(chatId, { pending_prompt: null });
-    await sendTelegram(
-      chatId,
-      "Поисковые запросы теперь подбираются автоматически по описанию продукта.",
-      { reply_markup: mainMenuMarkup() },
-    );
-    return;
-  }
-
   await sendTelegram(
     chatId,
     "Состояние настройки не распознано. Нажми /start.",
@@ -704,17 +625,10 @@ async function handleCallbackQuery(q) {
     return;
   }
 
-  if (data === "edit_app" || data === "edit_searches") {
+  if (data === "edit_app") {
     const row = await db.getBotUser(chatId);
     if (!row?.setup_complete) {
       await sendTelegram(chatId, "Сначала /start и полная настройка.");
-      return;
-    }
-    if (data === "edit_searches") {
-      await sendTelegram(
-        chatId,
-        "Поисковые запросы теперь подбираются автоматически на основе описания продукта.",
-      );
       return;
     }
     const pending = PROMPTS.EDIT_APP;
@@ -925,11 +839,14 @@ async function runScan(chatId) {
       chatId,
       (sentCount > 0
         ? `✅ Готово!\n\n${summary}`
-        : `😴 Новых подходящих постов не найдено\n\n${summary}`) + scanQuotaHint,
+        : `😴 Новых подходящих постов не найдено\n\n${summary}`) +
+        scanQuotaHint,
       { reply_markup: mainMenuMarkup() },
     );
 
-    console.log(`Done. sent=${sentCount} relevant=${relevantCount} alreadySeen=${alreadySeenCount} chat=${chatId}`);
+    console.log(
+      `Done. sent=${sentCount} relevant=${relevantCount} alreadySeen=${alreadySeenCount} chat=${chatId}`,
+    );
   } catch (err) {
     console.error("Scan error:", err);
     await sendTelegram(chatId, `❌ Ошибка: ${err.message}`, {
