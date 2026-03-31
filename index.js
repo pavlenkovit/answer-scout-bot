@@ -37,7 +37,8 @@ RULES:
 5. Do not be pushy or salesy. Help first, mention the product as a natural part of your answer.
 6. Write in the same language as the original post.
 7. Sound like a real person: warm, direct, no corporate speak, no bullet-point lists, no "As someone who…" openers.
-8. Do not invent features or capabilities not described above.`;
+8. Do not invent features or capabilities not described above.
+9. Plain text only. No markdown: no asterisks, no bold/italic, no headers, no bullet lists.`;
 }
 
 function buildRelevancePrompt(post, profile) {
@@ -985,6 +986,7 @@ async function runScan(chatId) {
         `<b>${escapeHtml(post.title)}</b>`,
         `${escapeHtml(postedAgo)} · ${escapeHtml(commentsRu)} · ↑${post.votes}`,
         escapeHtml(post.url),
+        `\nНиже ответ на пост:`,
       ].join("\n");
 
       await sendTelegram(chatId, info, { parse_mode: "HTML" });
