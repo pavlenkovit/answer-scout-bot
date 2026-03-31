@@ -835,12 +835,17 @@ async function runScan(chatId) {
 
     const sinceIso = weekAgoIso();
     const seen = await db.loadSeenMap(chatId, sinceIso);
-    let newPostsCount = 0;
+    let sentCount = 0;
+    let relevantCount = 0;
+    let alreadySeenCount = 0;
 
     const posts = await fetchPostsViaApify(queries);
 
     for (const post of posts) {
-      if (seen[post.id]) continue;
+      if (seen[post.id]) {
+        alreadySeenCount++;
+        continue;
+      }
       if (!isRelevantPost(post)) {
         await db.saveSeenPost(chatId, post.id, {
           skipped: true,
@@ -863,6 +868,8 @@ async function runScan(chatId) {
         continue;
       }
 
+      relevantCount++;
+
       const reply = await generateReply(post, profile);
       if (!reply || !String(reply).trim()) {
         console.error(`  Empty or missing reply from model, skipping`);
@@ -882,7 +889,7 @@ async function runScan(chatId) {
 
       await sendTelegram(chatId, info, { parse_mode: "HTML" });
       await sendTelegram(chatId, reply);
-      newPostsCount++;
+      sentCount++;
 
       await db.saveSeenPost(chatId, post.id, {
         title: post.title,
@@ -908,15 +915,21 @@ async function runScan(chatId) {
       scanQuotaHint = `\n\nДальше каждый поиск — ${SCAN_PRICE_STARS} ⭐.`;
     }
 
+    const summary = [
+      `Релевантных постов: ${relevantCount + alreadySeenCount}`,
+      `Уже показаны ранее: ${alreadySeenCount}`,
+      `Отправлено сейчас: ${sentCount}`,
+    ].join("\n");
+
     await sendTelegram(
       chatId,
-      (newPostsCount > 0
-        ? `✅ Готово! Найдено новых постов: ${newPostsCount}`
-        : `😴 Новых подходящих постов не найдено`) + scanQuotaHint,
+      (sentCount > 0
+        ? `✅ Готово!\n\n${summary}`
+        : `😴 Новых подходящих постов не найдено\n\n${summary}`) + scanQuotaHint,
       { reply_markup: mainMenuMarkup() },
     );
 
-    console.log(`Done. New posts for ${chatId}: ${newPostsCount}`);
+    console.log(`Done. sent=${sentCount} relevant=${relevantCount} alreadySeen=${alreadySeenCount} chat=${chatId}`);
   } catch (err) {
     console.error("Scan error:", err);
     await sendTelegram(chatId, `❌ Ошибка: ${err.message}`, {
