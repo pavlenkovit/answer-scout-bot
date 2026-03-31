@@ -372,16 +372,7 @@ function mainMenuMarkup() {
   return JSON.stringify({
     inline_keyboard: [
       [{ text: "🔍 Найти новые вопросы", callback_data: "scan" }],
-      [{ text: "⚙️ Настройки", callback_data: "open_settings" }],
-    ],
-  });
-}
-
-function settingsMarkup() {
-  return JSON.stringify({
-    inline_keyboard: [
       [{ text: "🚀 Информация о продукте", callback_data: "edit_app" }],
-      [{ text: "« В меню", callback_data: "back_menu" }],
     ],
   });
 }
@@ -596,12 +587,6 @@ async function requestPaidScan(chatId) {
   await sendScanStarsInvoice(chatId);
 }
 
-function normSearchQueriesFromText(text) {
-  return text
-    .split(/\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
 
 function onboardingInstruction(step) {
   switch (step) {
@@ -695,21 +680,6 @@ async function handleStart(chatId, userId) {
   await sendMainMenu(chatId);
 }
 
-async function handleSettings(chatId) {
-  const row = await db.getBotUser(chatId);
-  if (!row) {
-    await sendTelegram(chatId, "Сначала нажми /start и пройди настройку.");
-    return;
-  }
-  if (!row.setup_complete) {
-    await sendTelegram(chatId, "Сначала закончи первичную настройку: /start");
-    return;
-  }
-  await sendTelegram(chatId, "Что изменить?", {
-    reply_markup: settingsMarkup(),
-  });
-}
-
 async function handleCancel(chatId) {
   const row = await db.getBotUser(chatId);
   if (!row) {
@@ -717,7 +687,7 @@ async function handleCancel(chatId) {
     return;
   }
   if (!row.pending_prompt) {
-    await sendTelegram(chatId, "Нет активного ввода. /settings или /start");
+    await sendTelegram(chatId, "Нет активного ввода. /start");
     return;
   }
   await db.updateBotUser(chatId, { pending_prompt: null });
@@ -736,7 +706,7 @@ async function handleCancel(chatId) {
 async function handlePlainText(chatId, text) {
   const row = await db.getBotUser(chatId);
   if (!row || !row.pending_prompt) {
-    await sendTelegram(chatId, "Нажми /start или /settings.");
+    await sendTelegram(chatId, "Нажми /start.");
     return;
   }
 
@@ -795,21 +765,6 @@ async function handleCallbackQuery(q) {
 
   if (data === "scan") {
     await requestPaidScan(chatId);
-    return;
-  }
-
-  if (data === "open_settings") {
-    await handleSettings(chatId);
-    return;
-  }
-
-  if (data === "back_menu") {
-    const row = await db.getBotUser(chatId);
-    if (row?.setup_complete) {
-      await sendMainMenu(chatId);
-    } else {
-      await sendTelegram(chatId, "Сначала заверши настройку: /start");
-    }
     return;
   }
 
@@ -1108,10 +1063,6 @@ async function pollUpdates() {
           await handleStart(chatId, userId);
           continue;
         }
-        if (cmd === "/settings") {
-          await handleSettings(chatId);
-          continue;
-        }
         if (cmd === "/cancel") {
           await handleCancel(chatId);
           continue;
@@ -1119,7 +1070,7 @@ async function pollUpdates() {
         if (text.startsWith("/")) {
           await sendTelegram(
             chatId,
-            "Неизвестная команда. Доступны: /start /settings /cancel",
+            "Неизвестная команда. Доступны: /start /cancel",
           );
           continue;
         }
