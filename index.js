@@ -524,7 +524,6 @@ async function requestPaidScan(chatId) {
   await sendScanStarsInvoice(chatId);
 }
 
-
 function onboardingInstruction(step) {
   switch (step) {
     case PROMPTS.ONBOARD_APP:
@@ -878,7 +877,7 @@ async function runScan(chatId) {
         `<b>${escapeHtml(post.title)}</b>`,
         `${escapeHtml(postedAgo)} · ${escapeHtml(commentsRu)} · ↑${post.votes}`,
         escapeHtml(post.url),
-        `\nНиже ответ на пост:`,
+        `Ниже ответ на пост:`,
       ].join("\n");
 
       await sendTelegram(chatId, info, { parse_mode: "HTML" });
